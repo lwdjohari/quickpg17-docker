@@ -26,8 +26,8 @@ services:
     volumes:
       - "${HOST_DATA_DIR:-./data}:${CONTAINER_DATA_DIR:-/var/lib/postgresql/data}"
       - "${HOST_LOG_DIR:-./logs}:${CONTAINER_LOG_DIR:-/var/log/postgresql}"
-      - "${HOST_CONF_DIR:-./docker/conf}:${CONTAINER_CONF_DIR:-/etc/postgresql}:ro"
-      - "${HOST_INITDB_DIR:-./initdb}:${CONTAINER_INITDB_DIR:-/docker-entrypoint-initdb.d}:ro"
+    #  - "${HOST_CONF_DIR:-./docker/conf}:${CONTAINER_CONF_DIR:-/etc/postgresql}:ro"
+    #  - "${HOST_INITDB_DIR:-./initdb}:${CONTAINER_INITDB_DIR:-/docker-entrypoint-initdb.d}:ro"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -h 127.0.0.1 -p 5432"]
       interval: 10s
