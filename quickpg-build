@@ -91,12 +91,12 @@ ask() {
   local prompt="$1"; local def="${2-}"; local secret="${3-}"; local out=""
   if [ "$NONINTERACTIVE" = "true" ]; then printf "%s" "$def"; return; fi
   if [ -n "$def" ]; then
-    if [ "$secret" = "secret" ]; then read -r -s -p "$(printf "%b?%b %s [%s]: " "${C_BLUE}" "${C_RESET}" "$prompt" "$def")" out; echo
-    else read -r -p "$(printf "%b?%b %s [%s]: " "${C_BLUE}" "${C_RESET}" "$prompt" "$def")" out; fi
+    if [ "$secret" = "secret" ]; then read -r -s -p "$(printf "\n%b?%b %s [%s]: " "${C_BLUE}" "${C_RESET}" "$prompt" "$def")" out; echo
+    else read -r -p "$(printf "\n%b?%b %s [%s]: " "${C_BLUE}" "${C_RESET}" "$prompt" "$def")" out; fi
     out="${out:-$def}"
   else
-    if [ "$secret" = "secret" ]; then read -r -s -p "$(printf "%b?%b %s: " "${C_BLUE}" "${C_RESET}" "$prompt")" out; echo
-    else read -r -p "$(printf "%b?%b %s: " "${C_BLUE}" "${C_RESET}" "$prompt")" out; fi
+    if [ "$secret" = "secret" ]; then read -r -s -p "$(printf "\n%b?%b %s: " "${C_BLUE}" "${C_RESET}" "$prompt")" out; echo
+    else read -r -p "$(printf "\n%b?%b %s: " "${C_BLUE}" "${C_RESET}" "$prompt")" out; fi
   fi
   printf "%s" "$out"
 }
@@ -104,8 +104,8 @@ ask() {
 ask_password_twice() {
   local label="$1" p1="" p2=""
   while true; do
-    read -r -s -p "$(printf "%b?%b \n%s: " "${C_BLUE}" "${C_RESET}" "$label")" p1; echo
-    read -r -s -p "$(printf "%b?%b \nConfirm %s: " "${C_BLUE}" "${C_RESET}" "$label")" p2; echo
+    read -r -s -p "$(printf "\n%b?%b %s: " "${C_BLUE}" "${C_RESET}" "$label")" p1; echo
+    read -r -s -p "$(printf "\n%b?%b Confirm %s: " "${C_BLUE}" "${C_RESET}" "$label")" p2; echo
     [[ -z "$p1" ]] && { warn "Empty password not allowed."; continue; }
     [[ "$p1" != "$p2" ]] && { err "Passwords do not match."; continue; }
     if [[ "$p1" == *$'\n'* || "$p2" == *$'\n'* ]]; then err "Newlines not allowed in passwords."; continue; fi
@@ -261,7 +261,7 @@ fi
 
 if [[ "$REUSE_SECRET_FILES" != "true" ]]; then
   # Collect secrets inline first (may later be written to files)
-  APP_DB="$(ask "\nDefault DB to create on first boot" "$APP_DB")"
+  APP_DB="$(ask "Default DB to create on first boot" "$APP_DB")"
   say ""
 
   if [ -z "${POSTGRES_SUPERUSER_PASSWORD-}" ]; then

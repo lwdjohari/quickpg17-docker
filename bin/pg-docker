@@ -592,8 +592,11 @@ case "$cmd" in
   check)
     log_event "event=check"
     cat <<EOF
-${C_BOLD}Project:${C_RESET} ${COMPOSE_PROJECT_NAME}  ${C_BOLD}Port:${C_RESET} ${PG_PORT:-5432}  ${C_BOLD}TZ:${C_RESET} ${TZ:-UTC}
-${C_BOLD}DB:${C_RESET} ${APP_DB:-?}  ${C_BOLD}Roles:${C_RESET} ${DBA_USER:-?}, ${RW_USER:-?}, ${RO_USER:-?}
+${C_BOLD}Project:${C_RESET} ${COMPOSE_PROJECT_NAME}  
+${C_BOLD}DB Port:${C_RESET} ${PG_PORT:-5432}  
+${C_BOLD}TZ:${C_RESET} ${TZ:-UTC}
+${C_BOLD}DB:${C_RESET} ${APP_DB:-?}  
+${C_BOLD}Roles:${C_RESET} ${DBA_USER:-?}, ${RW_USER:-?}, ${RO_USER:-?}
 ${C_BOLD}Backups:${C_RESET} ${BACKUP_ENABLED:-false} (COMPOSE_PROFILES='${COMPOSE_PROFILES:-}')
 ${C_BOLD}Secrets:${C_RESET} $( secrets_mode_is_file && echo "file-based (*_FILE)" || echo "inline env" )
 ${C_BOLD}Compose files:${C_RESET} $(compose_files_summary)
