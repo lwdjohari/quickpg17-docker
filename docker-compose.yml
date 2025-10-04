@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  pg:
+    build:
+      context: .   #repo root (so Dockerfile can COPY ../db-utils)
+      dockerfile: ./docker/Dockerfile
+      target: ${DBUTILS_BUILD_TARGET:-core_dbutils}
+    image: org/pg17-full:latest
+    container_name: ${PROJECT_NAME:-pg17}
+    restart: unless-stopped
+    env_file:
+      - ./.env
+      - ./.env.local
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
+      APP_DB: ${APP_DB}
+      DBA_USER: ${DBA_USER}
+      DBA_PASSWORD: ${DBA_PASSWORD}
+      RW_USER: ${RW_USER}
+      RW_PASSWORD: ${RW_PASSWORD}
+      RO_USER: ${RO_USER}
+      RO_PASSWORD: ${RO_PASSWORD}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - "${HOST_DATA_DIR:-./data}:${CONTAINER_DATA_DIR:-/var/lib/postgresql/data}"
+      - "${HOST_LOG_DIR:-./logs}:${CONTAINER_LOG_DIR:-/var/log/postgresql}"
+      - "${HOST_CONF_DIR:-./docker/conf}:${CONTAINER_CONF_DIR:-/etc/postgresql}:ro"
+      - "${HOST_INITDB_DIR:-./initdb}:${CONTAINER_INITDB_DIR:-/docker-entrypoint-initdb.d}:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -h 127.0.0.1 -p 5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  pgbackups:
+    profiles: ["backup"]
+    image: alpine:3.20
+    container_name: ${PROJECT_NAME:-pg17}-backups
+    restart: unless-stopped
+    depends_on: [pg]
+    environment:
+      TZ: ${TZ:-UTC}
+      PGHOST: pg
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
+      APP_DB: ${APP_DB}
+    ports:
+      - "${BACKUP_PORT:-5433}:5432"
+    volumes:
+      - "${HOST_BACKUP_DIR:-./backups}:${CONTAINER_BACKUP_DIR:-/backups}"
+      - ./ops/backup/backup.sh:/usr/local/bin/backup.sh:ro
+      - ./ops/backup/crontab:/etc/crontabs/root:ro
+    command: ["/bin/sh","-c","chmod +x /usr/local/bin/backup.sh && crond -f -l 8"]
