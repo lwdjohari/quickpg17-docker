@@ -1,8 +1,36 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+
+# ---------- defaults for ALL envs we reference (safe for `set -u`) ----------
 : "${PGDATA:=/var/lib/postgresql/data}"
 : "${PGBIN:=/usr/lib/postgresql/17/bin}"
+
+# Official PG image envs (initialize everything to avoid 'unbound variable')
+: "${POSTGRES_USER:=postgres}"
+: "${POSTGRES_DB:=}"                       # official default handled below (= POSTGRES_USER)
+: "${POSTGRES_PASSWORD:=}"
+: "${POSTGRES_PASSWORD_FILE:=}"
+: "${POSTGRES_HOST_AUTH_METHOD:=}"         # e.g. "trust" (we still recommend passwords)
+: "${POSTGRES_INITDB_ARGS:=}"
+: "${POSTGRES_INITDB_WALDIR:=}"            # optional; empty means unset
+: "${TZ:=UTC}"
+
+# Your aliases and app vars (also default to empty)
+# : "${POSTGRES_SUPERUSER_PASSWORD:=}"
+# : "${POSTGRES_SUPERUSER_PASSWORD_FILE:=}"
+
+# : "${APP_DB:=}"
+# : "${DBA_USER:=}"
+# : "${DBA_PASSWORD:=}"
+# : "${DBA_PASSWORD_FILE:=}"
+# : "${RW_USER:=}"
+# : "${RW_PASSWORD:=}"
+# : "${RW_PASSWORD_FILE:=}"
+# : "${RO_USER:=}"
+# : "${RO_PASSWORD:=}"
+# : "${RO_PASSWORD_FILE:=}"
+
 
 log(){ echo "[entrypoint] $*"; }
 
@@ -39,19 +67,11 @@ fi
 # Now we are postgres user
 # Support official envs
 file_env 'POSTGRES_PASSWORD'
-file_env 'POSTGRES_USER' 'postgres'
 file_env 'POSTGRES_DB'
-file_env 'POSTGRES_INITDB_ARGS'
-file_env 'POSTGRES_INITDB_WALDIR'
-file_env 'POSTGRES_HOST_AUTH_METHOD'    # e.g., trust
 
 # app-level vars (enable *_FILE support for all)
-file_env 'APP_DB'
-file_env 'DBA_USER'
 file_env 'DBA_PASSWORD'
-file_env 'RW_USER'
 file_env 'RW_PASSWORD'
-file_env 'RO_USER'
 file_env 'RO_PASSWORD'
 
 
