@@ -9,10 +9,13 @@ services:
     image: org/pg17-full:latest
     container_name: ${PROJECT_NAME:-pg17}
     restart: unless-stopped
+    working_dir: /
     env_file:
       - ./.env
       - ./.env.local
     environment:
+      TZ: ${TZ:-UTC}
+      # Inline (env) mode variables:
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
       APP_DB: ${APP_DB}
       DBA_USER: ${DBA_USER}
@@ -21,7 +24,6 @@ services:
       RW_PASSWORD: ${RW_PASSWORD}
       RO_USER: ${RO_USER}
       RO_PASSWORD: ${RO_PASSWORD}
-      TZ: ${TZ:-UTC}
     ports:
       - "${PG_PORT:-5432}:5432"
     volumes:
@@ -41,24 +43,16 @@ services:
     container_name: ${PROJECT_NAME:-pg17}-backups
     restart: unless-stopped
     depends_on: [pg]
-    env_file:
-      - ./.env
-      - ./.env.local
+    working_dir: /
     environment:
       TZ: ${TZ:-UTC}
       PGHOST: pg
       PGPORT: 5432
       PGUSER: postgres
+      # Inline (env) mode:
       PGPASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
       APP_DB: ${APP_DB}
     ports:
       - "${BACKUP_PORT:-5433}:5432"
     volumes:
       - "${HOST_BACKUP_DIR:-./backups}:${CONTAINER_BACKUP_DIR:-/backups}"
-      - ./ops/backup/backup.sh:/usr/local/bin/backup.sh:ro
-      - ./ops/backup/crontab:/etc/crontabs/root:ro
-    command:
-      [
-        "/bin/sh","-c",
-        "chmod +x /usr/local/bin/backup.sh && crond -f -l 8"
-      ]
