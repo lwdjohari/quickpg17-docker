@@ -76,7 +76,7 @@ COPY initdb/ /docker-entrypoint-initdb.d/
 RUN find /docker-entrypoint-initdb.d -type f -name '*.sh' -exec chmod +x {} + || true
 
 # Official-compatible entrypoint
-COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY docker/pg-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Pre-create common dirs (compose mounts may replace)
