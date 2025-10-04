@@ -6,6 +6,14 @@ set -Eeuo pipefail
 : "${PGBIN:=/usr/lib/postgresql/17/bin}"
 export PATH="${PGBIN}:${PATH}"
 
+# Logging mode: default to official behavior (stdout/stderr, no files)
+: "${PG_FILE_LOGGING:=off}"            # off = official behavior; on = write files
+: "${PG_FILE_LOG_DIR:=/var/log/postgresql}"
+: "${PG_FILE_LOG_DEST:=csvlog}"        # csvlog|stderr (used only when PG_FILE_LOGGING=on)
+: "${PG_FILE_LOG_FILENAME:=postgresql-%Y-%m-%d_%H%M%S.log}"
+: "${PG_FILE_LOG_ROT_AGE:=1d}"
+: "${PG_FILE_LOG_ROT_SIZE:=0}"
+
 # Logging toggles (safe defaults)
 : "${PG_LOG_CONNECTIONS:=on}"
 : "${PG_LOG_DISCONNECTIONS:=on}"
@@ -70,14 +78,13 @@ if [ "$(id -u)" = '0' ]; then
   install -d -m 0700 -o postgres -g postgres "$PGDATA"
   # socket dir
   install -d -m 0755 -o postgres -g postgres /var/run/postgresql
-  # log dir (is a volume -> must be (re)chowned every boot)
-  install -d -m 0755 -o postgres -g postgres /var/log/postgresql
-
-  # redirect PG log file to container stdout (PID 1)
-  ln -sf /proc/1/fd/1 /var/log/postgresql/postgresql-current.log
-
+  # log dir only if file logging is enabled
+  if [ "${PG_FILE_LOGGING}" = "on" ]; then
+    install -d -m 0755 -o postgres -g postgres "${PG_FILE_LOG_DIR}"
+  fi
   exec gosu postgres "$0" "$@"
 fi
+
 
 # Re-ensure PATH after gosu (important!)
 export PATH="${PGBIN}:${PATH}"
@@ -272,24 +279,38 @@ if $is_postgres_cmd && [ -z "$wantHelp" ]; then
     log "Initialization complete"
   fi
 
-  # Build logging flags (always apply)
-  log_flags=(
-    -c "log_connections=${PG_LOG_CONNECTIONS}"
-    -c "log_disconnections=${PG_LOG_DISCONNECTIONS}"
-    -c "log_line_prefix=${PG_LOG_LINE_PREFIX}"
-    -c "log_statement=${PG_LOG_STATEMENT}"
-    # collector ON, writing to the symlinked file -> appears in docker logs
-    -c "logging_collector=on"
-    -c "log_destination=csvlog"                 # or 'stderr' if you prefer plain text
-    -c "log_directory=/var/log/postgresql"
-    -c "log_filename=postgresql-current.log"    # <- fixed name (symlinked to /proc/1/fd/1)
-    -c "log_rotation_age=0"                     # disable time-based rotation
-    -c "log_rotation_size=0"                    # disable size-based rotation
-  )
+# Build logging flags
+  if [ "${PG_FILE_LOGGING}" = "on" ]; then
+    # File logging mode (your Option B), still apply connection logs etc.
+    log_flags=(
+      -c "logging_collector=on"
+      -c "log_destination=${PG_FILE_LOG_DEST}"
+      -c "log_directory=${PG_FILE_LOG_DIR}"
+      -c "log_filename=${PG_FILE_LOG_FILENAME}"
+      -c "log_rotation_age=${PG_FILE_LOG_ROT_AGE}"
+      -c "log_rotation_size=${PG_FILE_LOG_ROT_SIZE}"
+      -c "log_connections=${PG_LOG_CONNECTIONS}"
+      -c "log_disconnections=${PG_LOG_DISCONNECTIONS}"
+      -c "log_line_prefix=${PG_LOG_LINE_PREFIX}"
+      -c "log_statement=${PG_LOG_STATEMENT}"
+    )
+  else
+    # OFFICIAL behavior: everything to docker logs; no files
+    log_flags=(
+      -c "log_destination=stderr"
+      -c "logging_collector=off"
+      -c "log_connections=${PG_LOG_CONNECTIONS}"
+      -c "log_disconnections=${PG_LOG_DISCONNECTIONS}"
+      -c "log_line_prefix=${PG_LOG_LINE_PREFIX}"
+      -c "log_statement=${PG_LOG_STATEMENT}"
+    )
+  fi
 
-  # Apply regardless of mounted config
+  # Apply logging flags whether or not a mounted config is used
   if [ -f /etc/postgresql/postgresql.conf ]; then
-    exec "${PGBIN}/postgres" -D "$PGDATA" -c config_file=/etc/postgresql/postgresql.conf "${log_flags[@]}"
+    exec "${PGBIN}/postgres" -D "$PGDATA" \
+      -c config_file=/etc/postgresql/postgresql.conf \
+      "${log_flags[@]}"
   else
     exec "${PGBIN}/postgres" -D "$PGDATA" "${log_flags[@]}"
   fi
