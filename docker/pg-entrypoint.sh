@@ -63,14 +63,19 @@ if ! declare -F file_env >/dev/null 2>&1; then
   }
 fi
 
+
 # Drop root to postgres (official images do this with gosu)
 if [ "$(id -u)" = '0' ]; then
   # PGDATA (may be a volume)
   install -d -m 0700 -o postgres -g postgres "$PGDATA"
   # socket dir
   install -d -m 0755 -o postgres -g postgres /var/run/postgresql
-  # *** LOG DIR (is a volume -> must be (re)chowned every boot) ***
+  # log dir (is a volume -> must be (re)chowned every boot)
   install -d -m 0755 -o postgres -g postgres /var/log/postgresql
+
+  # redirect PG log file to container stdout (PID 1)
+  ln -sf /proc/1/fd/1 /var/log/postgresql/postgresql-current.log
+
   exec gosu postgres "$0" "$@"
 fi
 
@@ -273,15 +278,16 @@ if $is_postgres_cmd && [ -z "$wantHelp" ]; then
     -c "log_disconnections=${PG_LOG_DISCONNECTIONS}"
     -c "log_line_prefix=${PG_LOG_LINE_PREFIX}"
     -c "log_statement=${PG_LOG_STATEMENT}"
-    # --- file logging under /var/log/postgresql ---
+    # collector ON, writing to the symlinked file -> appears in docker logs
     -c "logging_collector=on"
-    -c "log_destination=csvlog"                     # or 'stderr' if you prefer text files
-    -c "log_directory=/var/log/postgresql"         # absolute path works with collector=on
-    -c "log_filename=postgresql-%Y-%m-%d_%H%M%S.log"
-    -c "log_rotation_age=1d"
-    -c "log_rotation_size=0"
+    -c "log_destination=csvlog"                 # or 'stderr' if you prefer plain text
+    -c "log_directory=/var/log/postgresql"
+    -c "log_filename=postgresql-current.log"    # <- fixed name (symlinked to /proc/1/fd/1)
+    -c "log_rotation_age=0"                     # disable time-based rotation
+    -c "log_rotation_size=0"                    # disable size-based rotation
   )
 
+  # Apply regardless of mounted config
   if [ -f /etc/postgresql/postgresql.conf ]; then
     exec "${PGBIN}/postgres" -D "$PGDATA" -c config_file=/etc/postgresql/postgresql.conf "${log_flags[@]}"
   else
