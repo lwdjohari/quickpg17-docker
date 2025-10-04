@@ -6,22 +6,27 @@ set -Eeuo pipefail
 
 log(){ echo "[entrypoint] $*"; }
 
-# --- official-style file_env helper (VAR / VAR_FILE) ---
-file_env() {
-  local var="$1"; local file_var="${var}_FILE"; local def="${2:-}"
-  if [ -n "${!var-}" ] && [ -n "${!file_var-}" ]; then
-    echo >&2 "error: both $var and $file_var are set (but are exclusive)"
-    exit 1
-  fi
-  local val="$def"
-  if [ -n "${!var-}" ]; then
-    val="${!var}"
-  elif [ -n "${!file_var-}" ]; then
-    val="$(< "${!file_var}")"
-  fi
-  export "$var"="$val"
-  unset "$file_var"
-}
+# ---------- make sure file_env exists (official-style) ----------
+if ! declare -F file_env >/dev/null 2>&1; then
+  file_env() {
+    local var="$1"; local def="${2-}"; local fileVar="${var}_FILE"
+    local val="${!var-}"; local file="${!fileVar-}"
+    if [ -n "${val}" ] && [ -n "${file}" ]; then
+      echo >&2 "error: both $var and $fileVar are set (but are exclusive)"
+      exit 1
+    fi
+    if [ -n "${val}" ]; then
+      export "$var"="$val"
+    elif [ -n "${file}" ]; then
+      export "$var"="$(< "$file")"
+    elif [ -n "${def}" ]; then
+      export "$var"="$def"
+    fi
+    unset "$fileVar"
+  }
+fi
+
+
 
 # Drop root to postgres (official images do this with gosu)
 if [ "$(id -u)" = '0' ]; then
@@ -40,6 +45,16 @@ file_env 'POSTGRES_INITDB_ARGS'
 file_env 'POSTGRES_INITDB_WALDIR'
 file_env 'POSTGRES_HOST_AUTH_METHOD'    # e.g., trust
 
+# app-level vars (enable *_FILE support for all)
+file_env 'APP_DB'
+file_env 'DBA_USER'
+file_env 'DBA_PASSWORD'
+file_env 'RW_USER'
+file_env 'RW_PASSWORD'
+file_env 'RO_USER'
+file_env 'RO_PASSWORD'
+
+
 # If arg starts with '-', prepend postgres
 if [ "${1:0:1}" = '-' ]; then
   set -- postgres "$@"
@@ -51,6 +66,7 @@ for arg; do
     -h|--help|--version) wantHelp=1 ;;
   esac
 done
+
 
 # Only init when running the server
 if [ "$1" = 'postgres' ] && [ -z "$wantHelp" ]; then
@@ -98,16 +114,45 @@ if [ "$1" = 'postgres' ] && [ -z "$wantHelp" ]; then
         "CREATE DATABASE \"${POSTGRES_DB}\" OWNER \"${POSTGRES_USER}\";"
     fi
 
+    # Make them available to shell init scripts, too
+    export APP_DB DBA_USER DBA_PASSWORD RW_USER RW_PASSWORD RO_USER RO_PASSWORD
+
+    # Common psql args: ON_ERROR_STOP, superuser, target DB = ${POSTGRES_DB:-postgres}
+    _psql_common_args=(
+    -v ON_ERROR_STOP=1
+    --username "${POSTGRES_USER:-postgres}"
+    -d "${POSTGRES_DB:-postgres}"
+    --set=APP_DB="${APP_DB:-}"
+    --set=DBA_USER="${DBA_USER:-}"
+    --set=DBA_PASSWORD="${DBA_PASSWORD:-}"
+    --set=RW_USER="${RW_USER:-}"
+    --set=RW_PASSWORD="${RW_PASSWORD:-}"
+    --set=RO_USER="${RO_USER:-}"
+    --set=RO_PASSWORD="${RO_PASSWORD:-}"
+    )
+
     # Process initdb.d (official semantics)
     process_init_file() {
-      local f="$1"
-      case "$f" in
-        *.sh)    log "Running $f"; . "$f" ;;
-        *.sql)   log "Running $f"; "$PGBIN"/psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "${POSTGRES_DB:-postgres}" -f "$f" ;;
-        *.sql.gz)log "Running $f (gz)"; gunzip -c "$f" | "$PGBIN"/psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "${POSTGRES_DB:-postgres}" ;;
-        *)       log "Ignoring $f" ;;
-      esac
-    }
+        local f="$1"
+        case "$f" in
+            *.sh)
+            log "Running $f"
+            # Expose target DB to shell scripts if they want it
+            TARGET_DB="${POSTGRES_DB:-postgres}" INITDB_USER="${POSTGRES_USER:-postgres}" . "$f"
+            ;;
+            *.sql)
+            log "Running $f (db=${POSTGRES_DB:-postgres})"
+            "$PGBIN"/psql "${_psql_common_args[@]}" -f "$f"
+            ;;
+            *.sql.gz)
+            log "Running $f (gz) (db=${POSTGRES_DB:-postgres})"
+            gunzip -c "$f" | "$PGBIN"/psql "${_psql_common_args[@]}"
+            ;;
+            *)
+            log "Ignoring $f"
+            ;;
+        esac
+        }
 
     if [ -d /docker-entrypoint-initdb.d ]; then
       log "Processing /docker-entrypoint-initdb.d"
