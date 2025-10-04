@@ -37,10 +37,10 @@ RUN set -e \
       postgresql-17-hypopg \
  && rm -rf /var/lib/apt/lists/*
 
-ENV PG_MAJOR=17
-ENV PGBIN=/usr/lib/postgresql/17/bin
-# Official default:
-ENV PGDATA=/var/lib/postgresql/data
+ENV PG_MAJOR=17 \
+    PGBIN=/usr/lib/postgresql/17/bin \
+    PGDATA=/var/lib/postgresql/data \
+    PATH="/usr/lib/postgresql/17/bin:${PATH}"
 
 # ------------------------------------------------------------
 # Builder stage for pg_uuidv7 (kept out of final image)
