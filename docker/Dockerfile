@@ -96,3 +96,9 @@ CMD ["/usr/local/bin/pg-entrypoint", "-c", "config_file=/etc/postgresql/postgres
 
 ENTRYPOINT ["/usr/local/bin/pg-entrypoint"]
 
+FROM core AS core_dbutils
+# copy from repo root because build context is "."
+COPY db-utils /opt/db-utils
+RUN chmod -R a+rX /opt/db-utils && \
+    ln -sf /opt/db-utils/dbutil.sh /usr/local/bin/dbutil && \
+    chmod +x /usr/local/bin/dbutil /opt/db-utils/*.sh
