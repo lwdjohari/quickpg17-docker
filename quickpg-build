@@ -104,8 +104,8 @@ ask() {
 ask_password_twice() {
   local label="$1" p1="" p2=""
   while true; do
-    read -r -s -p "$(printf "%b?%b %s: " "${C_BLUE}" "${C_RESET}" "\n$label")" p1; echo
-    read -r -s -p "$(printf "%b?%b Confirm %s: " "${C_BLUE}" "${C_RESET}" "\n$label")" p2; echo
+    read -r -s -p "$(printf "%b?%b \n%s: " "${C_BLUE}" "${C_RESET}" "$label")" p1; echo
+    read -r -s -p "$(printf "%b?%b \nConfirm %s: " "${C_BLUE}" "${C_RESET}" "$label")" p2; echo
     [[ -z "$p1" ]] && { warn "Empty password not allowed."; continue; }
     [[ "$p1" != "$p2" ]] && { err "Passwords do not match."; continue; }
     if [[ "$p1" == *$'\n'* || "$p2" == *$'\n'* ]]; then err "Newlines not allowed in passwords."; continue; fi
