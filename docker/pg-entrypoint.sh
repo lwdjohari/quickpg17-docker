@@ -6,14 +6,21 @@ set -Eeuo pipefail
 : "${PGBIN:=/usr/lib/postgresql/17/bin}"
 export PATH="${PGBIN}:${PATH}"
 
+# Logging toggles (safe defaults)
+: "${PG_LOG_CONNECTIONS:=on}"
+: "${PG_LOG_DISCONNECTIONS:=on}"
+: "${PG_LOG_LINE_PREFIX:=%m [%p] %u@%d %r }"
+: "${PG_LOG_STATEMENT:=none}"
+: "${PG_INIT_SUMMARY:=1}"
+
 # Official PG image envs (initialize everything to avoid 'unbound variable')
 : "${POSTGRES_USER:=postgres}"
-# : "${POSTGRES_DB:=}"                       # official default handled below (= POSTGRES_USER)
+# : "${POSTGRES_DB:=}"                       # (= POSTGRES_USER by official semantics if unset)
 # : "${POSTGRES_PASSWORD:=}"
 # : "${POSTGRES_PASSWORD_FILE:=}"
-# : "${POSTGRES_HOST_AUTH_METHOD:=}"         # e.g. "trust" (we still recommend passwords)
+# : "${POSTGRES_HOST_AUTH_METHOD:=}"         # e.g. "trust"
 # : "${POSTGRES_INITDB_ARGS:=}"
-# : "${POSTGRES_INITDB_WALDIR:=}"            # optional; empty means unset
+# : "${POSTGRES_INITDB_WALDIR:=}"
 # : "${TZ:=UTC}"
 
 # Your aliases and app vars (also default to empty)
@@ -104,6 +111,21 @@ if [ "${1:-}" = "${PGBIN}/postgres" ] || [ "${1:-}" = "postgres" ]; then
   is_postgres_cmd=true
 fi
 
+# --- tiny helpers for psql with consistent flags & nice logging ---
+_psql(){
+  "${PGBIN}/psql" -v ON_ERROR_STOP=1 "$@"
+}
+_psqlA(){
+  # -A (unaligned), -t (tuples only)
+  "${PGBIN}/psql" -v ON_ERROR_STOP=1 -At "$@"
+}
+_psql_log(){
+  # prints a heading and the command output indented for docker logs readability
+  local heading="$1"; shift
+  log "$heading"
+  _psql "$@" | sed 's/^/  /'
+}
+
 # Only init when running the server
 if $is_postgres_cmd && [ -z "$wantHelp" ]; then
   # Empty data dir?
@@ -145,8 +167,7 @@ if $is_postgres_cmd && [ -z "$wantHelp" ]; then
     # Create POSTGRES_DB if set and != postgres
     if [ -n "${POSTGRES_DB:-}" ] && [ "$POSTGRES_DB" != 'postgres' ]; then
       log "Creating database $POSTGRES_DB owned by $POSTGRES_USER"
-      "${PGBIN}/psql" -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -Atc \
-        "CREATE DATABASE \"${POSTGRES_DB}\" OWNER \"${POSTGRES_USER}\";"
+      _psql -U "$POSTGRES_USER" -d postgres -Atc "CREATE DATABASE \"${POSTGRES_DB}\" OWNER \"${POSTGRES_USER}\";"
     fi
 
     # Make them available to shell init scripts, too
@@ -154,7 +175,6 @@ if $is_postgres_cmd && [ -z "$wantHelp" ]; then
 
     # Common psql args: ON_ERROR_STOP, superuser, target DB = ${POSTGRES_DB:-postgres}
     _psql_common_args=(
-      -v ON_ERROR_STOP=1
       --username "${POSTGRES_USER:-postgres}"
       -d "${POSTGRES_DB:-postgres}"
       --set=APP_DB="${APP_DB:-}"
@@ -175,11 +195,11 @@ if $is_postgres_cmd && [ -z "$wantHelp" ]; then
           ;;
         *.sql)
           log "Running $f (db=${POSTGRES_DB:-postgres})"
-          "${PGBIN}/psql" "${_psql_common_args[@]}" -f "$f"
+          _psql "${_psql_common_args[@]}" -f "$f"
           ;;
         *.sql.gz)
           log "Running $f (gz) (db=${POSTGRES_DB:-postgres})"
-          gunzip -c "$f" | "${PGBIN}/psql" "${_psql_common_args[@]}"
+          gunzip -c "$f" | _psql "${_psql_common_args[@]}"
           ;;
         *)
           log "Ignoring $f"
@@ -194,14 +214,64 @@ if $is_postgres_cmd && [ -z "$wantHelp" ]; then
       | while IFS= read -r -d '' f; do process_init_file "$f"; done
     fi
 
+    # ----- INIT SUMMARY (safe, no secrets) -----
+    if [ "${PG_INIT_SUMMARY}" = "1" ]; then
+      log "----- Initialization Summary -----"
+      # Show key settings
+      _psql_log "Server settings:" \
+        -U "$POSTGRES_USER" -d "${POSTGRES_DB:-postgres}" -c \
+        "select name, setting from pg_settings
+         where name in ('listen_addresses','port','ssl','max_connections','shared_buffers','unix_socket_directories')
+         order by name;"
+
+      # Effective HBA rules
+      _psql_log "Effective pg_hba.conf rules:" \
+        -U "$POSTGRES_USER" -d "${POSTGRES_DB:-postgres}" -c \
+        "select type, database, user_name, address, netmask, auth_method, options, error
+         from pg_hba_file_rules
+         order by line_number;"
+
+      # Roles (safe flags only; no password info)
+      _psql_log "Roles:" \
+        -U "$POSTGRES_USER" -d "${POSTGRES_DB:-postgres}" -c \
+        "select rolname, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls
+         from pg_roles
+         order by rolname;"
+
+      # Databases (non-templates)
+      _psql_log "Databases:" \
+        -U "$POSTGRES_USER" -d "${POSTGRES_DB:-postgres}" -c \
+        "select datname, datdba::regrole as owner, pg_size_pretty(pg_database_size(datname)) as size
+         from pg_database
+         where datistemplate=false
+         order by datname;"
+
+      # Extensions
+      _psql_log "Installed extensions (in target DB):" \
+        -U "$POSTGRES_USER" -d "${POSTGRES_DB:-postgres}" -c \
+        "select extname, extversion from pg_extension order by extname;"
+
+      log "----- End of Initialization Summary -----"
+    fi
+
     "${PGBIN}/pg_ctl" -D "$PGDATA" -m fast -w stop
     log "Initialization complete"
   fi
 
-  # Prefer your mounted config if present
+  # Build logging flags (even when using a mounted config)
+  log_flags=(
+    -c "log_connections=${PG_LOG_CONNECTIONS}"
+    -c "log_disconnections=${PG_LOG_DISCONNECTIONS}"
+    -c "log_line_prefix=${PG_LOG_LINE_PREFIX}"
+    -c "log_statement=${PG_LOG_STATEMENT}"
+  )
+
+  # Prefer your mounted config if present, but still apply log flags for visibility
   if [ -f /etc/postgresql/postgresql.conf ]; then
-    exec "${PGBIN}/postgres" -D "$PGDATA" -c config_file=/etc/postgresql/postgresql.conf
+    exec "${PGBIN}/postgres" -D "$PGDATA" -c config_file=/etc/postgresql/postgresql.conf "${log_flags[@]}"
   fi
+
+  # otherwise normal exec continues below
 fi
 
 # Fall-through: run what the user asked for (already normalized if postgres)
