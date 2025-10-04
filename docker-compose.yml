@@ -6,7 +6,7 @@ services:
       context: .
       dockerfile: ./docker/Dockerfile
       target: ${DBUTILS_BUILD_TARGET:-core_dbutils}
-    image: org/pg17-full:latest
+    image: ${IMAGE_NAME:-quickpg17:latest}
     container_name: ${PROJECT_NAME:-pg17}
     restart: unless-stopped
     working_dir: /
