@@ -94,9 +94,9 @@ docker_cmd() {
 
 dc() {
   # Compose files chosen dynamically by secrets mode
-  local files=(-f "${ROOT}/docker-compose.yaml")
+  local files=(-f "${ROOT}/docker-compose.yml")
   if secrets_mode_is_file; then
-    files+=(-f "${ROOT}/docker-compose.secrets.yaml")
+    files+=(-f "${ROOT}/docker-compose.secrets.yml")
   fi
   docker_cmd compose --project-name "${COMPOSE_PROJECT_NAME}" "${files[@]}" "$@"
 }
@@ -288,9 +288,9 @@ guard_identifier() {
 
 compose_files_summary() {
   if secrets_mode_is_file; then
-    echo "docker-compose.yaml + docker-compose.secrets.yaml"
+    echo "docker-compose.yml + docker-compose.secrets.yml"
   else
-    echo "docker-compose.yaml"
+    echo "docker-compose.yml"
   fi
 }
 
