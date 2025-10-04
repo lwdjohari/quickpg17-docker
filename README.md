@@ -4,36 +4,10 @@ PostgreSQL 17 in a quick ready to use Docker Container (PostGIS • TimescaleDB 
 > **Goal:** a production-grade Postgres 17 in Docker with the right extensions, **compose-immutable** (nobody needs to touch `docker-compose.yml`).  
 > **Control everything via** `.env` / `.env.local` + `./bin/pg-docker` + `Makefile`.
 
----
 
-## 🔥 TL;DR
 
-```bash
-# Clone repo, enter folder
-cp .env.example .env                # then edit .env
-cp .env.local.example .env.local    # create .env.local for overrides
-                                    # never commit the .env.local 
-                                    # git-ignored overrides per env/user
-
-# use `pg-docker.sh`
-./bin/pg-docker-docker up                  # start DB (compose stays untouched)
-./bin/pg-docker-docker psql                # psql into $APP_DB
-
-# Optional: turn on backup sidecar (no compose edits)
-./bin/pg-docker-docker backup:on
-./bin/pg-docker-docker logs:backup
-
-# Optional: manage DBs/roles/extensions *inside* the container
-./bin/pg-docker-docker create-db telemetry
-./bin/pg-docker-docker create-dba telemetry app_dba 'strong_pw'
-./bin/pg-docker-docker add-ext   telemetry "postgis,pgvector,pg_partman:partman,pg_cron"
-./bin/pg-docker-docker list-ext  telemetry
-```
-
----
-
-## ✅ What You Get
-
+## ✅ What You Get in `quickpg17`
+- **pg-docker** cli to manage the container and db lifecycles.
 - **PostgreSQL 17** built with:
   - **PostGIS** (core, topology, raster)
   - **TimescaleDB 2.x** (for PG17)
@@ -46,7 +20,172 @@ cp .env.local.example .env.local    # create .env.local for overrides
 - **Optional db-utils baked into the image** (or attach at runtime)
 - **Security defaults**: SCRAM, remote superuser blocked, least-privilege roles
 
+
+
+## 🔥 TL;DR
+
+Use `quickpg-build` the builder interactive wizard for **quickpg17**.
+
+```bash
+Usage: ./quickpg-build [--non-interactive] [--yes|-y] [--no-start] [--sudo-docker]
+```
+
+**Generate** only the .env & .env.local
+```bash
+./quickpg-build --no-start
+```
+
+**Generate** the configurations, **build** docker image and **compose** the container
+```bash
+./quickpg-build --sudo-docker       # If your docker need sudo to execute
+
+# or
+
+./quickpg-build --sudo-docker       # If your docker don't need sudo to exexcute 
+```
+
+Or if you want all manual control, follow this flow
+
+```bash
+# Clone repo, enter folder
+cp .env.example .env                # then edit .env
+cp .env.local.example .env.local    # create .env.local for overrides
+                                    # never commit the .env.local 
+                                    # git-ignored overrides per env/user
+
+# use `pg-docker.sh`
+./bin/pg-docker up                  # start DB (compose stays untouched)
+./bin/pg-docker psql                # psql into $APP_DB
+
+# Optional: turn on backup sidecar (no compose edits)
+./bin/pg-docker backup:on
+./bin/pg-docker logs:backup
+
+# Optional: manage DBs/roles/extensions *inside* the container
+./bin/pg-docker create-db telemetry
+./bin/pg-docker create-dba telemetry app_dba 'strong_pw'
+./bin/pg-docker add-ext   telemetry "postgis,pgvector,pg_partman:partman,pg_cron"
+./bin/pg-docker list-ext  telemetry
+```
+## 🧩 Don't Touch Compose Rules
+
+- **Do not edit** `docker-compose.yml`.
+- Build using interactive wizard **quickpg-build** or **./bin/pg-docker** cli.
+- Configure everything via:
+  - `.env` (defaults) + `.env.local` (overrides, git-ignored)
+  - `./bin/pg-docker` (team CLI) and/or `make` targets
+- You can change data/logs/backups/config/initdb **paths** via env only.
+
+
+
+
+
+## 📦 pg-docker CLI
+
+`pg-docker` is a colorful, ops-first command-line wrapper to manage a
+PostgreSQL 17 Docker stack with backups, extensions, and operational
+utilities.
+
+It is designed to be **safe for production-like workflows** with:
+
+- **Dual logging**: logs every command both on the host and inside the
+  container.
+- **Consent prompts**: destructive/heavy commands require explicit
+  typing of YES.
+- **Sudo control**: run docker via sudo with `--sudo-docker` (optional
+  `--sudo-presupply`).
+- **Ops-first defaults**: prompts for DB credentials (hidden), never
+  logs passwords.
+
 ---
+
+### 🚀 Usage
+
+```bash
+./bin/pg-docker [--sudo-docker] [--sudo-presupply] <command>
+```
+
+Flags: - `--sudo-docker` → Run docker/compose commands via `sudo` -
+`--sudo-presupply` → Prompt for sudo password (hidden, twice) and cache
+with `sudo -v`
+
+
+
+### 🔹 Docker Lifecycle
+
+
+Command Description Example
+
+
+`up` Start containers [`./bin/pg-docker up`](#start--rebuild--stop)
+
+`up:rebuild` Rebuild images (no cache), then start [`./bin/pg-docker up:rebuild`](#start--rebuild--stop)
+
+`down` Stop & remove containers [`./bin/pg-docker down`](#start--rebuild--stop)
+
+`stop` Stop containers only [`./bin/pg-docker stop`](#start--rebuild--stop)
+
+`restart` Restart the `pg` container [`./bin/pg-docker restart`](#start--rebuild--stop)
+
+`ps` / `status` Show container status [`./bin/pg-docker status`](#inspect--shell)
+
+`logs` Follow Postgres logs [`./bin/pg-docker logs`](#inspect--shell)
+
+`logs:backup` Follow backup sidecar logs [`./bin/pg-docker logs:backup`](#inspect--shell)
+
+`shell` Open shell inside Postgres container [`./bin/pg-docker shell`](#inspect--shell)
+
+`psql` Open psql inside container [`./bin/pg-docker psql`](#inspect--shell)
+
+
+
+### 🔹 Database Utilities
+
+
+Command Description Example
+
+
+`create-db <db>` Create new database [`./bin/pg-docker create-db mydb`](#create-a-database)
+
+`create-dba <db> <user>` Create DBA user (with [`./bin/pg-docker create-dba mydb dba_user`](#create-dba--rw--ro-users-with-password-prompts)
+ password)
+
+`create-rw <db> <user>` Create read/write user [`./bin/pg-docker create-rw mydb app_rw`](#create-dba--rw--ro-users-with-password-prompts)
+
+`create-ro <db> <user>` Create read-only user [`./bin/pg-docker create-ro mydb app_ro`](#create-dba--rw--ro-users-with-password-prompts)
+
+`add-ext <db> "exts"` Add extensions [`./bin/pg-docker add-ext mydb "pgcrypto,uuid-ossp"`](#manage-extensions)
+
+`drop-ext <db> "exts"` Drop extensions [`./bin/pg-docker drop-ext mydb "uuid-ossp"`](#manage-extensions)
+
+`list-ext <db>` List extensions [`./bin/pg-docker list-ext mydb`](#manage-extensions)
+
+`dbutils:present` Check if db-utils is present [`./bin/pg-docker dbutils:present`](#db-utils-helper)
+
+`dbutils:attach` Attach db-utils [`./bin/pg-docker dbutils:attach`](#db-utils-helper)
+
+`dbutil ...` Run dbutil subcommand [`./bin/pg-docker dbutil create-db mydb`](#db-utils-helper)
+
+
+
+### 🔹 Ops Suite
+
+Includes: stats, maintenance, connections, backups, cron jobs, timescale
+policies, partition management.
+
+See examples in:
+
+- [Health & Stats](#-health--stats)
+- [Maintenance](#-maintenance)
+- [Connections](#-connections)
+- [WAL & Backups](#-wal--backups)
+- [Cron Jobs](#-cron-jobs-pg_cron)
+- [TimescaleDB Policies](#-timescaledb-policies)
+- [Partition Maintenance](#-partition-maintenance-pg_partman)
+  
+  
+---
+
 
 ## 🗂 Project Layout
 
@@ -93,16 +232,6 @@ quickpg17-docker/
    ├─ backup.sh
    └─ crontab
 ```
-
----
-
-## 🧩 Don't Touch Compose Rules
-
-- **Do not edit** `docker-compose.yml`.
-- Configure everything via:
-  - `.env` (defaults) + `.env.local` (overrides, git-ignored)
-  - `./bin/pg-docker` (team CLI) and/or `make` targets
-- You can change data/logs/backups/config/initdb **paths** via env only.
 
 ---
 
