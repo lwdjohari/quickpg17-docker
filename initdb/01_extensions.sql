@@ -21,7 +21,7 @@ BEGIN
   FOR ext IN SELECT unnest(ARRAY[
     'pgcrypto','hstore','pg_trgm','unaccent','pg_stat_statements',
     'pgstattuple','pgvector','pg_partman','pg_cron','pg_repack',
-    'pg_stat_kcache','pg_buffercache','hypopg'
+    'pg_stat_kcache','pg_buffercache','hypopg','pg_uuidv7'
   ]) LOOP
     IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = ext) THEN
       EXECUTE format('CREATE EXTENSION IF NOT EXISTS %I;', ext);
@@ -30,22 +30,35 @@ BEGIN
 END$$;
 
 -- TimescaleDB
-DO $$ BEGIN
+DO $$
+BEGIN
   IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name='timescaledb') THEN
     EXECUTE 'CREATE EXTENSION IF NOT EXISTS timescaledb;';
   END IF;
-END $$;
+END$$;
 
 -- Text search config (unaccent chain)
-DO $$ BEGIN
+DO $$
+BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'simple_unaccent') THEN
     CREATE TEXT SEARCH CONFIGURATION simple_unaccent ( COPY = simple );
     ALTER TEXT SEARCH CONFIGURATION simple_unaccent
       ALTER MAPPING FOR hword, hword_part, word
       WITH unaccent, simple;
   END IF;
-END $$;
+END$$;
 
--- pg_partman bgw
+-- pg_partman bgw config
 SELECT set_config('pg_partman_bgw.interval','3600',false);
-SELECT set_config('pg_partman_bgw.role',:'DBA_USER',false);
+SELECT set_config('pg_partman_bgw.role', :'DBA_USER',false);
+
+-- Error check (list all installed extensions for verification)
+SELECT extname, extversion, installed_version, default_version
+FROM pg_available_extensions
+WHERE extname IN (
+  'postgis','postgis_topology','postgis_raster',
+  'pgcrypto','hstore','pg_trgm','unaccent','pg_stat_statements',
+  'pgstattuple','pgvector','pg_partman','pg_cron','pg_repack',
+  'pg_stat_kcache','pg_buffercache','hypopg','pg_uuidv7','timescaledb'
+)
+ORDER BY extname;

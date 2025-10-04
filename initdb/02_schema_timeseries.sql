@@ -14,14 +14,33 @@ CREATE TABLE IF NOT EXISTS metrics_ts
 
 DO $$
 BEGIN
+  -- only run hypertable setup if timescaledb is installed
   IF EXISTS (SELECT 1 FROM pg_extension WHERE extname='timescaledb') THEN
-    PERFORM create_hypertable('metrics_ts','ts', chunk_time_interval => interval '7 days', if_not_exists => TRUE);
-    PERFORM add_retention_policy('metrics_ts', INTERVAL '180 days', if_not_exists => TRUE);
-    PERFORM add_compression_policy('metrics_ts', INTERVAL '30 days',  if_not_exists => TRUE);
-    ALTER TABLE metrics_ts SET (timescaledb.compress, timescaledb.compress_segmentby = 'device_id');
+    PERFORM create_hypertable(
+      'metrics_ts',
+      'ts',
+      chunk_time_interval => interval '7 days',
+      if_not_exists => TRUE
+    );
+
+    PERFORM add_retention_policy(
+      'metrics_ts',
+      INTERVAL '180 days',
+      if_not_exists => TRUE
+    );
+
+    PERFORM add_compression_policy(
+      'metrics_ts',
+      INTERVAL '30 days',
+      if_not_exists => TRUE
+    );
+
+    -- enable compression (segment by device_id)
+    EXECUTE 'ALTER TABLE metrics_ts SET (timescaledb.compress, timescaledb.compress_segmentby = ''device_id'')';
   END IF;
 END$$;
 
+-- supporting indexes
 CREATE INDEX IF NOT EXISTS metrics_ts_device_ts_btree ON metrics_ts (device_id, ts DESC);
 CREATE INDEX IF NOT EXISTS metrics_ts_ts_brin         ON metrics_ts USING brin (ts);
 CREATE INDEX IF NOT EXISTS metrics_ts_loc_gist        ON metrics_ts USING gist (loc);
@@ -37,7 +56,9 @@ CREATE TABLE IF NOT EXISTS metrics_part
   embedding   vector(384)
 ) PARTITION BY RANGE (ts);
 
-DO $$ BEGIN
+DO $$
+BEGIN
+  -- only run pg_partman setup if extension is installed
   IF EXISTS (SELECT 1 FROM pg_extension WHERE extname='pg_partman') THEN
     PERFORM partman.create_parent(
       p_parent_table := 'public.metrics_part',
@@ -49,4 +70,4 @@ DO $$ BEGIN
       p_use_run_maintenance := TRUE
     );
   END IF;
-END $$;
+END$$;
