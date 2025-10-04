@@ -267,17 +267,25 @@ if $is_postgres_cmd && [ -z "$wantHelp" ]; then
     log "Initialization complete"
   fi
 
-  # Build logging flags (even when using a mounted config)
+  # Build logging flags (always apply)
   log_flags=(
     -c "log_connections=${PG_LOG_CONNECTIONS}"
     -c "log_disconnections=${PG_LOG_DISCONNECTIONS}"
     -c "log_line_prefix=${PG_LOG_LINE_PREFIX}"
     -c "log_statement=${PG_LOG_STATEMENT}"
+    # --- file logging under /var/log/postgresql ---
+    -c "logging_collector=on"
+    -c "log_destination=csvlog"                     # or 'stderr' if you prefer text files
+    -c "log_directory=/var/log/postgresql"         # absolute path works with collector=on
+    -c "log_filename=postgresql-%Y-%m-%d_%H%M%S.log"
+    -c "log_rotation_age=1d"
+    -c "log_rotation_size=0"
   )
 
-  # Prefer your mounted config if present, but still apply log flags for visibility
   if [ -f /etc/postgresql/postgresql.conf ]; then
     exec "${PGBIN}/postgres" -D "$PGDATA" -c config_file=/etc/postgresql/postgresql.conf "${log_flags[@]}"
+  else
+    exec "${PGBIN}/postgres" -D "$PGDATA" "${log_flags[@]}"
   fi
 fi
 
