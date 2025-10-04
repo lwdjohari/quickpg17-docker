@@ -95,4 +95,4 @@ HEALTHCHECK --interval=10s --timeout=5s --retries=20 \
 CMD ["/usr/local/bin/pg-entrypoint", "-c", "config_file=/etc/postgresql/postgresql.conf"
 
 ENTRYPOINT ["/usr/local/bin/pg-entrypoint"]
-CMD ["postgres"]
+
