@@ -104,8 +104,8 @@ ask() {
 ask_password_twice() {
   local label="$1" p1="" p2=""
   while true; do
-    read -r -s -p "$(printf "%b?%b %s: " "${C_BLUE}" "${C_RESET}" "$label")" p1; echo
-    read -r -s -p "$(printf "%b?%b Confirm %s: " "${C_BLUE}" "${C_RESET}" "$label")" p2; echo
+    read -r -s -p "$(printf "%b?%b %s: " "${C_BLUE}" "${C_RESET}" "\n$label")" p1; echo
+    read -r -s -p "$(printf "%b?%b Confirm %s: " "${C_BLUE}" "${C_RESET}" "\n$label")" p2; echo
     [[ -z "$p1" ]] && { warn "Empty password not allowed."; continue; }
     [[ "$p1" != "$p2" ]] && { err "Passwords do not match."; continue; }
     if [[ "$p1" == *$'\n'* || "$p2" == *$'\n'* ]]; then err "Newlines not allowed in passwords."; continue; fi
@@ -261,25 +261,34 @@ fi
 
 if [[ "$REUSE_SECRET_FILES" != "true" ]]; then
   # Collect secrets inline first (may later be written to files)
+  APP_DB="$(ask "\nDefault DB to create on first boot" "$APP_DB")"
+  say ""
+
   if [ -z "${POSTGRES_SUPERUSER_PASSWORD-}" ]; then
     if [ "$NONINTERACTIVE" = "true" ] && [ "$USE_SECRET_FILES" != "true" ]; then err "POSTGRES_SUPERUSER_PASSWORD required"; exit 2; fi
     POSTGRES_SUPERUSER_PASSWORD="$(ask_password_twice "Postgres superuser password")"
+    say ""
   fi
-  APP_DB="$(ask "Default DB to create on first boot" "$APP_DB")"
+  
+  
   DBA_USER="$(ask "DBA username (owner of DB)" "$DBA_USER")"
   if [ -z "${DBA_PASSWORD-}" ]; then
     if [ "$NONINTERACTIVE" = "true" ] && [ "$USE_SECRET_FILES" != "true" ]; then err "DBA_PASSWORD required"; exit 2; fi
     DBA_PASSWORD="$(ask_password_twice "DBA password")"
+    say ""
   fi
+  
   RW_USER="$(ask "RW username (read/write)" "$RW_USER")"
   if [ -z "${RW_PASSWORD-}" ]; then
     if [ "$NONINTERACTIVE" = "true" ] && [ "$USE_SECRET_FILES" != "true" ]; then err "RW_PASSWORD required"; exit 2; fi
     RW_PASSWORD="$(ask_password_twice "RW password")"
+    say ""
   fi
   RO_USER="$(ask "RO username (read-only)" "$RO_USER")"
   if [ -z "${RO_PASSWORD-}" ]; then
     if [ "$NONINTERACTIVE" = "true" ] && [ "$USE_SECRET_FILES" != "true" ]; then err "RO_PASSWORD required"; exit 2; fi
     RO_PASSWORD="$(ask_password_twice "RO password")"
+    say ""
   fi
 fi
 
