@@ -35,14 +35,14 @@ for a in "$@"; do
     -h|--help)
       cat <<EOF
 
-${C_BOLD}quickpg-install${C_RESET}
+${C_BOLD}quickpg-build${C_RESET}
 ----------------------------------
-Install wizard for pg17-docker
+Build wizard for quickpg17-docker
 
 https://github.com/lwdjohari/quickpg17-docker
 Linggawasistha Djohari, 2025.
 
-Usage: ./quickpg-install [--non-interactive] [--yes|-y] [--no-start] [--sudo-docker]
+Usage: ./quickpg-build [--non-interactive] [--yes|-y] [--no-start] [--sudo-docker]
 
   --non-interactive  Use defaults & env vars; do not prompt (fails if required missing)
   --yes / -y         Auto confirm prompts
