@@ -65,8 +65,12 @@ fi
 
 # Drop root to postgres (official images do this with gosu)
 if [ "$(id -u)" = '0' ]; then
+  # PGDATA (may be a volume)
   install -d -m 0700 -o postgres -g postgres "$PGDATA"
+  # socket dir
   install -d -m 0755 -o postgres -g postgres /var/run/postgresql
+  # *** LOG DIR (is a volume -> must be (re)chowned every boot) ***
+  install -d -m 0755 -o postgres -g postgres /var/log/postgresql
   exec gosu postgres "$0" "$@"
 fi
 
