@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
+# ==============================================================================
 # bin/pg-docker — colorful, ops-first CLI with dual logging (host + container)
+#
+# Features:
+#   - *_FILE secret support (e.g. POSTGRES_SUPERUSER_PASSWORD_FILE=.secrets/pg_superuser.pw)
+#   - Secret resolver (prefers inline > file); logs are sanitized for both modes
+#   - Pre-compose configuration review & confirmation before up/up:rebuild
+#   - Dual logging: host + inside container
+#   - Consent prompts for risky ops
+#   - DB ops helpers (db-utils, stats, vacuum, repack, cron, etc.)
+#   - Simple permission fixer runner via check_perms()
+# ==============================================================================
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,6 +31,29 @@ err()  { printf "%b\n" "${C_RED}✖${C_RESET} $*" >&2; }
 [ -f "${ROOT}/.env" ]       && set -a && . "${ROOT}/.env" && set +a
 [ -f "${ROOT}/.env.local" ] && set -a && . "${ROOT}/.env.local" && set +a
 
+# ------ resolve secrets from *_FILE (supports .secrets) ----------------------
+# Usage: resolve_secret VAR_NAME
+resolve_secret() {
+  local var="$1"
+  local file_var="${var}_FILE"
+  local file_path="${!file_var-}"
+  # Prefer explicit inline value if present
+  if [ -n "${!var-}" ]; then
+    export "$var"="${!var}"
+    return 0
+  fi
+  # Else use file content if provided and readable
+  if [ -n "$file_path" ] && [ -r "$file_path" ]; then
+    local v; v="$(cat "$file_path")"
+    export "$var"="$v"
+  fi
+  return 0
+}
+
+# Resolve primary superuser secret once; others are entered interactively per-op
+resolve_secret POSTGRES_SUPERUSER_PASSWORD
+
+# Compose profiles / project
 if [ "${BACKUP_ENABLED:-false}" = "true" ]; then export COMPOSE_PROFILES=backup; else export COMPOSE_PROFILES=; fi
 export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-pg17}"
 
@@ -78,7 +112,7 @@ fi
 
 # ---------------------------- permissions ------------------------------------
 
-# Run the fix-perms script
+# Run the fix-perms script (kept for convenience)
 fix_perms() {
   bash permission-fix.sh
 }
@@ -88,7 +122,7 @@ check_perms() {
   echo "Fix permission for scripts and secrets:"
   bash permission-fix.sh
   echo "Current modes:"
-  ls -l bin/pg-docker quickpg-build permission-fix.sh db-utils/*.sh ops/backup/*.sh 2>/dev/null || true
+  ls -l bin/pg-docker quickpg-build quickpg-install permission-fix.sh db-utils/*.sh ops/backup/*.sh 2>/dev/null || true
 }
 
 # -------------------------- logging (host + container) -----------------------
@@ -99,14 +133,14 @@ USER_NAME="$(id -un 2>/dev/null || whoami)"
 HOST_NAME="$(hostname -s 2>/dev/null || hostname)"
 
 sanitize() {
-  # scrub common secret patterns if they ever appear
   local s="$*"
+  # redact inline & file-based secrets
   s="${s//POSTGRES_SUPERUSER_PASSWORD=*/POSTGRES_SUPERUSER_PASSWORD=***}"
+  s="${s//POSTGRES_SUPERUSER_PASSWORD_FILE=*/POSTGRES_SUPERUSER_PASSWORD_FILE=***}"
   s="${s//PGPASSWORD=*/PGPASSWORD=***}"
   s="${s//password=*/password=***}"
   s="${s//passwd=*/passwd=***}"
   s="${s//pwd=*/pwd=***}"
-  # collapse whitespace
   printf "%s" "$s" | tr '\n\r\t' '   '
 }
 
@@ -118,7 +152,6 @@ log_host() {
 
 log_container() {
   local line="$1"
-  # base64 the line so quoting stays safe
   local b64
   b64="$(printf '%s' "$line" | base64 | tr -d '\n')"
   dc exec -T pg sh -lc '
@@ -136,14 +169,12 @@ log_both() {
 }
 
 log_event() {
-  # log_event "key=value ..." (auto adds ts,user,host,project)
   local extra="$(sanitize "$*")"
   local base="ts=$(NOW_UTC) user=${USER_NAME} host=${HOST_NAME} project=${COMPOSE_PROJECT_NAME}"
   log_both "${base} ${extra}"
 }
 
 log_consent() {
-  # log consent with title
   local title="$1"
   log_event "event=consent title=$(sanitize "$title") status=accepted"
 }
@@ -155,9 +186,14 @@ ensure_dirs(){
   mkdir -p "${HOST_CLI_DIR}" || true
   chmod 700 "${HOST_DATA_DIR}" 2>/dev/null || true
 }
+
 preflight(){
   ensure_dirs
-  [ -n "${POSTGRES_SUPERUSER_PASSWORD:-}" ] || { err "Set POSTGRES_SUPERUSER_PASSWORD in .env/.env.local"; exit 2; }
+  # Accept either plain or file-based secret (resolved at top)
+  if [ -z "${POSTGRES_SUPERUSER_PASSWORD:-}" ]; then
+    err "Set POSTGRES_SUPERUSER_PASSWORD or POSTGRES_SUPERUSER_PASSWORD_FILE in .env/.env.local"
+    exit 2
+  fi
 }
 
 needs_dbutils(){
@@ -177,6 +213,7 @@ Options:
 MSG
     exit 2
   fi
+  # Use resolved superuser password
   dc exec -u postgres -e PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD:-}" pg dbutil "$@"
 }
 
@@ -199,13 +236,13 @@ prompt_db_creds() {
 psql_exec() {
   local DB="$1"; shift
   local SQL="$*"
-  dc exec -T -e PGPASSWORD="${DBPASS:-}" pg psql -v ON_ERROR_STOP=1 -U "${DBUSER}" -d "${DB}" -Atc "${SQL}"
+  dc exec -T -e PGPASSWORD="${DBPASS:-${POSTGRES_SUPERUSER_PASSWORD:-}}" pg psql -v ON_ERROR_STOP=1 -U "${DBUSER}" -d "${DB}" -Atc "${SQL}"
 }
 
 psql_file() {
   local DB="$1"; shift
   local FILE="$1"
-  dc exec -T -e PGPASSWORD="${DBPASS:-}" pg psql -v ON_ERROR_STOP=1 -U "${DBUSER}" -d "${DB}" -f "${FILE}"
+  dc exec -T -e PGPASSWORD="${DBPASS:-${POSTGRES_SUPERUSER_PASSWORD:-}}" pg psql -v ON_ERROR_STOP=1 -U "${DBUSER}" -d "${DB}" -f "${FILE}"
 }
 
 confirm_risk() {
@@ -227,14 +264,72 @@ guard_identifier() {
   esac
 }
 
+# --------- config review (like quickpg-install) before compose actions -------
+review_config_and_confirm() {
+  say ""
+  say "${C_BOLD}Review configuration (compose will use this)${C_RESET}"
+  cat <<CFG
+
+Project:              ${COMPOSE_PROJECT_NAME}
+Timezone:             ${TZ:-UTC}
+PG_PORT:              ${PG_PORT:-5432}
+
+# Database & Roles
+APP_DB:               ${APP_DB:-?}
+DBA_USER:             ${DBA_USER:-?}
+RW_USER:              ${RW_USER:-?}
+RO_USER:              ${RO_USER:-?}
+Secrets Mode:         $( [ -n "${POSTGRES_SUPERUSER_PASSWORD_FILE:-}" ] && echo "file-based (*_FILE)" || echo "inline env" )
+
+# Backups
+BACKUP_ENABLED:       ${BACKUP_ENABLED:-false}
+BACKUP_PORT:          ${BACKUP_PORT:-5433}
+COMPOSE_PROFILES:     ${COMPOSE_PROFILES:-}
+
+# Build Target
+DBUTILS_BUILD_TARGET: ${DBUTILS_BUILD_TARGET:-core_dbutils}
+
+# Host paths
+HOST_DATA_DIR:        ${HOST_DATA_DIR}
+HOST_LOG_DIR:         ${HOST_LOG_DIR}
+HOST_BACKUP_DIR:      ${HOST_BACKUP_DIR}
+HOST_CONF_DIR:        ${HOST_CONF_DIR:-./docker/conf}
+HOST_INITDB_DIR:      ${HOST_INITDB_DIR:-./initdb}
+
+# Container paths
+CONTAINER_DATA_DIR:   ${CONTAINER_DATA_DIR:-/var/lib/postgresql/data}
+CONTAINER_LOG_DIR:    ${CONTAINER_LOG_DIR:-/var/log/postgresql}
+CONTAINER_BACKUP_DIR: ${CONTAINER_BACKUP_DIR:-/backups}
+CONTAINER_CONF_DIR:   ${CONTAINER_CONF_DIR:-/etc/postgresql}
+CONTAINER_INITDB_DIR: ${CONTAINER_INITDB_DIR:-/docker-entrypoint-initdb.d}
+CFG
+
+  read -r -p "$(printf "%b?%b Proceed with docker compose? [y/N]: " "${C_BLUE}" "${C_RESET}")" resp < /dev/tty
+  case "${resp,,}" in y|yes) return 0 ;; *) warn "Aborted before compose."; exit 1 ;; esac
+}
+
 # -------------------------- command dispatch ---------------------------------
 cmd="${1:-help}"; shift || true
 ORIG_ARGS="${cmd} $*"
 log_event "event=invoke cmd=${cmd} args='$(sanitize "$*")'"
 
 case "$cmd" in
-  up)            preflight; ok "Starting containers..."; dc up -d; ok "Done." ;;
-  up:rebuild)    preflight; warn "Rebuilding image (no cache) ..."; dc build --pull --no-cache; ok "Starting..."; dc up -d; ok "Done." ;;
+  up)
+      preflight
+      review_config_and_confirm
+      ok "Starting containers..."
+      dc up -d
+      ok "Done."
+      ;;
+  up:rebuild)
+      preflight
+      review_config_and_confirm
+      warn "Rebuilding image (no cache) ..."
+      dc build --pull --no-cache
+      ok "Starting..."
+      dc up -d
+      ok "Done."
+      ;;
   down)          warn "Stopping & removing containers..."; dc down; ok "Down." ;;
   stop)          warn "Stopping..."; dc stop; ok "Stopped." ;;
   restart)       warn "Restarting pg..."; dc restart pg; ok "Restarted." ;;
@@ -344,7 +439,7 @@ case "$cmd" in
       confirm_risk "pg_repack ${TABLE}" "Online reorg; brief locks at start/finish. Needs pg_repack."
       log_event "event=ops:repack db=${DB} table=${TABLE}"
       prompt_db_creds
-      dc exec -T -e PGPASSWORD="${DBPASS:-}" pg pg_repack --host 127.0.0.1 --port 5432 --username "${DBUSER}" --dbname "${DB}" --table "${TABLE}" ;;
+      dc exec -T -e PGPASSWORD="${DBPASS:-${POSTGRES_SUPERUSER_PASSWORD:-}}" pg pg_repack --host 127.0.0.1 --port 5432 --username "${DBUSER}" --dbname "${DB}" --table "${TABLE}" ;;
 
   ops:bloat:estimate)
       DB="${1:?DB required}"; TABLE="${2:?schema.table required}"
@@ -380,7 +475,7 @@ case "$cmd" in
       prompt_db_creds
       TS="$(date -u +%Y%m%dT%H%M%SZ)"
       OUT="${CONTAINER_BACKUP_DIR:-/backups}/${DB}-${TS}.dump"
-      dc exec -T -e PGPASSWORD="${DBPASS:-}" pg pg_dump -Fc -h 127.0.0.1 -p 5432 -U "${DBUSER}" -d "${DB}" -f "${OUT}"
+      dc exec -T -e PGPASSWORD="${DBPASS:-${POSTGRES_SUPERUSER_PASSWORD:-}}" pg pg_dump -Fc -h 127.0.0.1 -p 5432 -U "${DBUSER}" -d "${DB}" -f "${OUT}"
       ok "Backup written to host: ${HOST_BACKUP_DIR}/${DB}-${TS}.dump" ;;
 
   ops:restore:file)
@@ -394,9 +489,9 @@ case "$cmd" in
       prompt_db_creds
       dc cp "${HOST_FILE}" pg:"${CONTAINER_BACKUP_DIR:-/backups}/${BASENAME}"
       if [[ "$BASENAME" == *.dump ]]; then
-        dc exec -T -e PGPASSWORD="${DBPASS:-}" pg pg_restore -h 127.0.0.1 -p 5432 -U "${DBUSER}" -d "${DB}" --clean --if-exists "${CONTAINER_BACKUP_DIR:-/backups}/${BASENAME}"
+        dc exec -T -e PGPASSWORD="${DBPASS:-${POSTGRES_SUPERUSER_PASSWORD:-}}" pg pg_restore -h 127.0.0.1 -p 5432 -U "${DBUSER}" -d "${DB}" --clean --if-exists "${CONTAINER_BACKUP_DIR:-/backups}/${BASENAME}"
       else
-        dc exec -T -e PGPASSWORD="${DBPASS:-}" pg psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -p 5432 -U "${DBUSER}" -d "${DB}" -f "${CONTAINER_BACKUP_DIR:-/backups}/${BASENAME}"
+        dc exec -T -e PGPASSWORD="${DBPASS:-${POSTGRES_SUPERUSER_PASSWORD:-}}" pg psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -p 5432 -U "${DBUSER}" -d "${DB}" -f "${CONTAINER_BACKUP_DIR:-/backups}/${BASENAME}"
       fi
       ok "Restore completed into ${DB}." ;;
 
@@ -468,6 +563,7 @@ case "$cmd" in
 ${C_BOLD}Project:${C_RESET} ${COMPOSE_PROJECT_NAME}  ${C_BOLD}Port:${C_RESET} ${PG_PORT:-5432}  ${C_BOLD}TZ:${C_RESET} ${TZ:-UTC}
 ${C_BOLD}DB:${C_RESET} ${APP_DB:-?}  ${C_BOLD}Roles:${C_RESET} ${DBA_USER:-?}, ${RW_USER:-?}, ${RO_USER:-?}
 ${C_BOLD}Backups:${C_RESET} ${BACKUP_ENABLED:-false} (COMPOSE_PROFILES='${COMPOSE_PROFILES:-}')
+${C_BOLD}Secrets:${C_RESET} $( [ -n "${POSTGRES_SUPERUSER_PASSWORD_FILE:-}" ] && echo "file-based (*_FILE)" || echo "inline env" )
 ${C_BOLD}Mounts:${C_RESET}
   DATA    => ${HOST_DATA_DIR} -> ${CONTAINER_DATA_DIR:-/var/lib/postgresql/data}
   LOGS    => ${HOST_LOG_DIR}  -> ${CONTAINER_LOG_DIR:-/var/log/postgresql}
@@ -503,10 +599,19 @@ ${C_YELLOW}Flags:${C_RESET}
   ${C_YELLOW}--sudo-presupply${C_RESET}    Prompt (hidden, twice) for sudo password and cache with sudo -v
 
 Docker:
-  ${C_BLUE}up${C_RESET} | ${C_BLUE}up:rebuild${C_RESET} | ${C_BLUE}down${C_RESET} | ${C_BLUE}restart${C_RESET} | ${C_BLUE}status${C_RESET} | ${C_BLUE}logs${C_RESET} | ${C_BLUE}logs:backup${C_RESET} | ${C_BLUE}shell${C_RESET} | ${C_BLUE}psql${C_RESET}
+  ${C_BLUE}check${C_RESET}            Check for project configurations 
+  ${C_BLUE}up${C_RESET}               Docker compose up, build docker image if not available
+  ${C_BLUE}up:rebuild${C_RESET}       Docker compose up and rebuild
+  ${C_BLUE}down${C_RESET}             Docker compose down
+  ${C_BLUE}restart${C_RESET}          Docker reset the container
+  ${C_BLUE}status${C_RESET}           Show container status
+  ${C_BLUE}logs${C_RESET}             Show cointainer logs
+  ${C_BLUE}logs:backup${C_RESET}
+  ${C_BLUE}shell${C_RESET}
+  ${C_BLUE}psql${C_RESET}
 
-Security
-  ${C_BLUE}fix-permission${C_RESET}
+Security:
+  ${C_BLUE}fix-permission${C_RESET}   Fix scripts file permissions
 
 Postgres Utilities:
   ${C_BLUE}create-db  <db>${C_RESET}
@@ -547,17 +652,12 @@ ${C_DIM}Logging:${C_RESET}
   ${C_DIM}Container log: /opt/db-utils/logs/pg-docker-ops.log${C_RESET}
 
 ${C_DIM}Notes:${C_RESET}${C_DIM}
-  - Sensitive commands in pg-docker is need sudo elevation for security & safety. 
-  - All commands usage are being logging in the host and container respectively.
+  - Sensitive commands in pg-docker need sudo elevation for security & safety. 
+  - All commands usage are logged on the host and inside the container.
   - All destructive/heavy operations print a risk summary and require typing YES.
-  - Ops always prompt for DB user & hidden password (not stored, not shown).
+  - Ops prompt for DB user & hidden password (not stored).
   - Use --sudo-docker (and optional --sudo-presupply) to run Docker via sudo.
 ${C_RESET}
 EOF
-
-#${C_DIM}Tip:Place flags anywhere, e.g.:
-#  ./bin/pg-docker ${C_YELLOW}--sudo-docker${C_RESET}${C_DIM} up
-#  ./bin/pg-docker create-dba mydb mydba ${C_RESET}${C_YELLOW}--sudo-docker --sudo-presupply${C_RESET}
-
     ;;
 esac
