@@ -21,9 +21,8 @@ PostgreSQL 17 in a quick ready to use Docker Container (PostGIS • TimescaleDB 
 - **Optional db-utils baked into the image** (or attach at runtime)
 - **Security defaults**: SCRAM, remote superuser blocked, least-privilege roles
 
-## Table of Content
 - [Quickpg17 Docker](#quickpg17-docker)
-  - [What You Get in `quickpg17`](#what-you-get-in-quickpg17)
+  - [What You Get in quickpg17](#what-you-get-in-quickpg17)
   - [TL;DR](#tldr)
   - [pg-docker CLI](#pg-docker-cli)
     - [Usage](#usage)
@@ -51,6 +50,8 @@ PostgreSQL 17 in a quick ready to use Docker Container (PostGIS • TimescaleDB 
   - [Production Checklist](#production-checklist)
   - [Notes](#notes)
   - [License](#license)
+
+
 
 
 
