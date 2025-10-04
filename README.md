@@ -11,6 +11,7 @@ PostgreSQL 17 in a quick ready to use Docker Container (PostGIS • TimescaleDB 
 - **PostgreSQL 17** built with:
   - **PostGIS** (core, topology, raster)
   - **TimescaleDB 2.x** (for PG17)
+  - **UUIDv7** support via **pg_uuidv7** extension.
   - **pgvector**, **pg_partman**, **pg_cron**, **pg_repack**
   - **pg_stat_statements**, **pg_stat_kcache**, **pg_buffercache**, **pgstattuple**
   - **pgcrypto**, **hstore**, **pg_trgm**, **unaccent**, **hypopg**
@@ -20,11 +21,42 @@ PostgreSQL 17 in a quick ready to use Docker Container (PostGIS • TimescaleDB 
 - **Optional db-utils baked into the image** (or attach at runtime)
 - **Security defaults**: SCRAM, remote superuser blocked, least-privilege roles
 
+## Table of Content
+- [Quickpg17 Docker](#quickpg17-docker)
+  - [What You Get in `quickpg17`](#what-you-get-in-quickpg17)
+  - [TL;DR](#tldr)
+  - [pg-docker CLI](#pg-docker-cli)
+    - [Usage](#usage)
+    - [Docker Lifecycle](#docker-lifecycle)
+    - [Database Utilities](#database-utilities)
+    - [Ops Suite](#ops-suite)
+  - [Project Layout](#project-layout)
+  - [Configuration (Env)](#configuration-env)
+    - [Core](#core)
+    - [Volume Mapping (Host ↔ Container)](#volume-mapping-host--container)
+  - [Building the Image (db-utils optional)](#building-the-image-db-utils-optional)
+  - [Start / Stop](#start--stop)
+  - [Backups (Sidecar)](#backups-sidecar)
+  - [DB-Utils (Inside Container)](#db-utils-inside-container)
+  - [Extensions Catalog (What/Why/How)](#extensions-catalog-whatwhyhow)
+  - [Init Scripts (first boot)](#init-scripts-first-boot)
+  - [Operations](#operations)
+  - [Security Defaults](#security-defaults)
+  - [Volumes: Verify & Move](#volumes-verify--move)
+  - [Health & Debug](#health--debug)
+  - [Troubleshooting Matrix](#troubleshooting-matrix)
+  - [Common Recipes](#common-recipes)
+  - [Sanity Queries](#sanity-queries)
+  - [FAQ](#faq)
+  - [Production Checklist](#production-checklist)
+  - [Notes](#notes)
+  - [License](#license)
+
 
 
 ## 🔥 TL;DR
 
-Use `quickpg-build` the builder interactive wizard for **quickpg17**.
+Use **`quickpg-build`** the builder interactive wizard for **quickpg17**.
 
 ```bash
 Usage: ./quickpg-build [--non-interactive] [--yes|-y] [--no-start] [--sudo-docker]
