@@ -1,0 +1,416 @@
+#!/usr/bin/env bash
+# quickpg-install — interactive install wizard for the pg17-docker stack
+# Usage: ./quickpg-install [--non-interactive] [--yes] [--no-start] [--sudo-docker]
+# This script configures .env/.env.local, prepares host folders, builds the image
+# (with optional db-utils baked in), and brings the stack up without editing compose.
+set -euo pipefail
+
+# ----------------------------- UI helpers ------------------------------------
+# --- Color output ---
+supports_color() { [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" ]]; }
+if supports_color; then
+  C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'; C_RED=$'\e[31m'; C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_BLUE=$'\e[34m'; C_RESET=$'\e[0m'
+else
+  C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_RESET=""
+fi
+say()  { printf "%s\n" "$*"; }
+ok()   { say "${C_GREEN}✔${C_RESET} $*"; }
+warn() { say "${C_YELLOW}⚠${C_RESET} $*"; }
+err()  { printf "%s\n" "${C_RED}✖${C_RESET} $*" >&2; }
+
+# ----------------------------- args ------------------------------------------
+NONINTERACTIVE="false"
+ASSUME_YES="false"
+NO_START="false"
+USE_SUDO_DOCKER="false"   # if true, run docker/compose via sudo
+PRE_SUPPLY_SUDO="false"   # if true, capture sudo password (hidden) and use sudo -S
+SUDO_PW=""
+
+for a in "$@"; do
+  case "$a" in
+    --non-interactive) NONINTERACTIVE="true" ;;
+    --yes|-y)          ASSUME_YES="true" ;;
+    --no-start)        NO_START="true" ;;
+    --sudo-docker)     USE_SUDO_DOCKER="true" ;;
+    -h|--help)
+      cat <<EOF
+
+${C_BOLD}quickpg-install${C_RESET}
+----------------------------------
+Install wizard for pg17-docker
+
+https://github.com/lwdjohari/quickpg17-docker
+Linggawasistha Djohari, 2025.
+
+Usage: ./quickpg-install [--non-interactive] [--yes|-y] [--no-start] [--sudo-docker]
+
+  --non-interactive  Use defaults & env vars; do not prompt (fails if required missing)
+  --yes / -y         Auto confirm prompts
+  --no-start         Do not run docker compose up at the end
+  --sudo-docker      Run all docker/compose commands via sudo
+
+Environment overrides accepted for any variable written to .env.local (e.g. PG_PORT=55432).
+
+EOF
+      exit 0;;
+    *) err "Unknown arg: $a"; exit 2;;
+  esac
+done
+
+# ----------------------------- helpers ---------------------------------------
+need_cmd() { command -v "$1" >/dev/null 2>&1 || { err "Missing required command: $1"; exit 2; }; }
+
+ask() {
+  # ask "Prompt" "default" ["secret"]
+  local prompt="$1"; local def="${2-}"; local secret="${3-}"; local out=""
+  if [ "$NONINTERACTIVE" = "true" ]; then
+    printf "%s" "$def"
+    return
+  fi
+  if [ -n "$def" ]; then
+    if [ "$secret" = "secret" ]; then
+      read -r -s -p "$(printf "%b?%b %s [%s]: " "${C_BLUE}" "${C_RESET}" "$prompt" "$def")" out; echo
+    else
+      read -r -p "$(printf "%b?%b %s [%s]: " "${C_BLUE}" "${C_RESET}" "$prompt" "$def")" out
+    fi
+    out="${out:-$def}"
+  else
+    if [ "$secret" = "secret" ]; then
+      read -r -s -p "$(printf "%b?%b %s: " "${C_BLUE}" "${C_RESET}" "$prompt")" out; echo
+    else
+      read -r -p "$(printf "%b?%b %s: " "${C_BLUE}" "${C_RESET}" "$prompt")" out
+    fi
+  fi
+  printf "%s" "$out"
+}
+
+ask_password_twice() {
+  # ask_password_twice "Prompt label"
+  local label="$1" p1="" p2=""
+  while true; do
+    read -r -s -p "$(printf "%b?%b %s: " "${C_BLUE}" "${C_RESET}" "$label")" p1; echo
+    read -r -s -p "$(printf "%b?%b Confirm %s: " "${C_BLUE}" "${C_RESET}" "$label")" p2; echo
+    if [ -z "$p1" ]; then
+      warn "Empty password not allowed. Try again."
+      continue
+    fi
+    if [ "$p1" != "$p2" ]; then
+      err "Passwords do not match. Try again."
+      continue
+    fi
+    printf "%s" "$p1"
+    return
+  done
+}
+
+confirm() {
+  local msg="$1"
+  if [ "$ASSUME_YES" = "true" ] || [ "$NONINTERACTIVE" = "true" ]; then
+    return 0
+  fi
+  read -r -p "$(printf "%b?%b %s [y/N]: " "${C_BLUE}" "${C_RESET}" "$msg")" resp
+  case "${resp,,}" in y|yes) return 0 ;; *) return 1 ;; esac
+}
+
+docker_cmd() {
+  if [ "$USE_SUDO_DOCKER" = "true" ]; then
+    if [ "$PRE_SUPPLY_SUDO" = "true" ] && [ -n "$SUDO_PW" ]; then
+      printf '%s\n' "$SUDO_PW" | sudo -S -p "" docker "$@"
+    else
+      sudo docker "$@"
+    fi
+  else
+    docker "$@"
+  fi
+}
+compose_cmd() { docker_cmd compose "$@"; }
+
+# ----------------------------- preflight -------------------------------------
+
+cat <<EOF
+
+${C_BOLD}quickpg-install${C_RESET}
+----------------------------------
+Install wizard for pg17-docker
+
+https://github.com/lwdjohari/quickpg17-docker
+Linggawasistha Djohari, 2025.
+
+EOF
+
+need_cmd bash
+need_cmd grep
+need_cmd sed
+need_cmd awk
+need_cmd dirname
+need_cmd date
+
+ROOT="$(pwd)"
+[ -f "${ROOT}/docker-compose.yml" ] || { err "Run this from the repo root with docker-compose.yml"; exit 2; }
+
+# Decide whether to sudo docker if not via args
+if [ "$USE_SUDO_DOCKER" = "false" ] && [ "$NONINTERACTIVE" = "false" ]; then
+  if confirm "Run Docker commands with sudo?"; then
+    USE_SUDO_DOCKER="true"
+    if confirm "Pre-supply sudo password now (hidden) to avoid repeated prompts?"; then
+      PRE_SUPPLY_SUDO="true"
+      SUDO_PW="$(ask_password_twice "sudo password")"
+      ok "Got sudo password (not stored)."
+    fi
+  fi
+fi
+
+# Verify docker & compose availability (respecting sudo choice)
+need_cmd docker
+if ! docker_cmd version >/dev/null 2>&1; then
+  err "Cannot run 'docker version' (check Docker installation and/or sudo choice)."
+  exit 2
+fi
+if ! compose_cmd version >/dev/null 2>&1; then
+  err "Docker Compose v2 unavailable ('docker compose'). Install Docker Desktop or Compose v2."
+  exit 2
+fi
+
+# ----------------------------- bootstrap env ---------------------------------
+mkfile_if_missing() {
+  local src="$1" dst="$2"
+  if [ ! -f "$dst" ]; then
+    cp "$src" "$dst"
+    ok "Created $dst from template"
+  fi
+}
+if [ ! -f ".env" ] && [ -f ".env.example" ]; then cp .env.example .env; ok "Created .env"; fi
+[ -f ".env.local" ] || touch ".env.local"
+
+# Load defaults from .env.example first, then .env, then .env.local
+set -a
+. ".env.example" 2>/dev/null || true
+. ".env" 2>/dev/null || true
+. ".env.local" 2>/dev/null || true
+set +a
+
+# Defaults (if still unset)
+PROJECT_NAME="${PROJECT_NAME:-pg17}"
+PG_PORT="${PG_PORT:-5432}"
+TZ="${TZ:-Asia/Jakarta}"
+APP_DB="${APP_DB:-appdb}"
+DBA_USER="${DBA_USER:-app_dba}"
+RW_USER="${RW_USER:-app_rw}"
+RO_USER="${RO_USER:-app_ro}"
+BACKUP_ENABLED="${BACKUP_ENABLED:-false}"
+BACKUP_PORT="${BACKUP_ENABLED:-5433}"
+DBUTILS_BUILD_TARGET="${DBUTILS_BUILD_TARGET:-core_dbutils}"
+
+HOST_DATA_DIR="${HOST_DATA_DIR:-./data}"
+HOST_LOG_DIR="${HOST_LOG_DIR:-./logs}"
+HOST_BACKUP_DIR="${HOST_BACKUP_DIR:-./backups}"
+HOST_CONF_DIR="${HOST_CONF_DIR:-./docker/conf}"
+HOST_INITDB_DIR="${HOST_INITDB_DIR:-./initdb}"
+
+CONTAINER_DATA_DIR="${CONTAINER_DATA_DIR:-/var/lib/postgresql/data}"
+CONTAINER_LOG_DIR="${CONTAINER_LOG_DIR:-/var/log/postgresql}"
+CONTAINER_BACKUP_DIR="${CONTAINER_BACKUP_DIR:-/backups}"
+CONTAINER_CONF_DIR="${CONTAINER_CONF_DIR:-/etc/postgresql}"
+CONTAINER_INITDB_DIR="${CONTAINER_INITDB_DIR:-/docker-entrypoint-initdb.d}"
+
+say "${C_BOLD}quickpg-install — pg17-docker setup wizard${C_RESET}"
+say "${C_DIM}Repo: ${ROOT}${C_RESET}"
+echo
+
+# ----------------------------- collect inputs --------------------------------
+if [ "$NONINTERACTIVE" = "false" ]; then
+  say "${C_BOLD}General settings${C_RESET}"
+fi
+PROJECT_NAME="$(ask "Project/container name" "$PROJECT_NAME")"
+PG_PORT="$(ask "Host port to expose Postgres on" "$PG_PORT")"
+TZ="$(ask "Timezone (IANA)" "$TZ")"
+
+# Passwords (double entry & hidden)
+if [ -z "${POSTGRES_SUPERUSER_PASSWORD-}" ]; then
+  if [ "$NONINTERACTIVE" = "true" ]; then
+    err "POSTGRES_SUPERUSER_PASSWORD must be set in env for non-interactive mode."
+    exit 2
+  fi
+  POSTGRES_SUPERUSER_PASSWORD="$(ask_password_twice "Postgres superuser password")"
+fi
+
+APP_DB="$(ask "Default DB to create on first boot" "$APP_DB")"
+DBA_USER="$(ask "DBA username (owner of DB)" "$DBA_USER")"
+if [ -z "${DBA_PASSWORD-}" ]; then
+  if [ "$NONINTERACTIVE" = "true" ]; then err "DBA_PASSWORD required in non-interactive mode."; exit 2; fi
+  DBA_PASSWORD="$(ask_password_twice "DBA password")"
+fi
+RW_USER="$(ask "RW username (read/write)" "$RW_USER")"
+if [ -z "${RW_PASSWORD-}" ]; then
+  if [ "$NONINTERACTIVE" = "true" ]; then err "RW_PASSWORD required in non-interactive mode."; exit 2; fi
+  RW_PASSWORD="$(ask_password_twice "RW password")"
+fi
+RO_USER="$(ask "RO username (read-only)" "$RO_USER")"
+if [ -z "${RO_PASSWORD-}" ]; then
+  if [ "$NONINTERACTIVE" = "true" ]; then err "RO_PASSWORD required in non-interactive mode."; exit 2; fi
+  RO_PASSWORD="$(ask_password_twice "RO password")"
+fi
+
+# Feature toggles
+BACKUP_ENABLED_DEF="$( [ "$BACKUP_ENABLED" = "true" ] && echo "true" || echo "false" )"
+BACKUP_ENABLED_ANS="$(ask "Enable backup sidecar (daily dumps) true/false" "$BACKUP_ENABLED_DEF")"
+case "${BACKUP_ENABLED_ANS,,}" in true|1|yes|y) BACKUP_ENABLED="true" ;; *) BACKUP_ENABLED="false" ;; esac
+
+if [[ "$BACKUP_ENABLED_ANS" =~ ^(true|1|yes|y)$ ]]; then
+    BACKUP_ENABLED="true"
+
+    while true; do
+        BACKUP_PORT=$(ask "Enter backup port" "5433")
+
+        # Check empty
+        if [[ -z "$BACKUP_PORT" ]]; then
+            echo "❌ ERROR: Backup port cannot be empty."
+            continue
+        fi
+
+        # Check numeric
+        if ! [[ "$BACKUP_PORT" =~ ^[0-9]+$ ]]; then
+            echo "❌ ERROR: Backup port must be numeric."
+            continue
+        fi
+
+        # Check not same as PG_PORT
+        if [[ "$BACKUP_PORT" == "$PG_PORT" ]]; then
+            echo "❌ ERROR: Backup port ($BACKUP_PORT) cannot be the same as PG_PORT ($PG_PORT)."
+            continue
+        fi
+
+        # If all checks pass
+        break
+    done
+
+    echo "✅ Backup enabled on port $BACKUP_PORT"
+else
+    BACKUP_ENABLED="false"
+    echo "ℹ️ Backup is disabled."
+fi
+
+# Build target (db-utils baked in or not)
+DBUTILS_BUILD_TARGET="$(ask "Image build target [core_dbutils|minimal 'core']" "$DBUTILS_BUILD_TARGET")"
+if [ "${DBUTILS_BUILD_TARGET}" = "core" ]; then
+  warn "Building minimal image without db-utils baked in."
+fi
+
+# Volume mapping (host)
+say
+say "${C_BOLD}Host volume locations (press Enter to accept defaults)${C_RESET}"
+HOST_DATA_DIR="$(ask "Host DATA dir" "$HOST_DATA_DIR")"
+HOST_LOG_DIR="$(ask "Host LOG dir" "$HOST_LOG_DIR")"
+HOST_BACKUP_DIR="$(ask "Host BACKUP dir" "$HOST_BACKUP_DIR")"
+HOST_CONF_DIR="$(ask "Host CONF dir" "$HOST_CONF_DIR")"
+HOST_INITDB_DIR="$(ask "Host INITDB dir" "$HOST_INITDB_DIR")"
+
+# ----------------------------- write .env.local -------------------------------
+say
+say "${C_BOLD}Writing .env.local${C_RESET}"
+cat > .env.local <<ENVEOF
+# Generated by quickpg-install on $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+PROJECT_NAME=${PROJECT_NAME}
+PG_PORT=${PG_PORT}
+TZ=${TZ}
+POSTGRES_SUPERUSER_PASSWORD=${POSTGRES_SUPERUSER_PASSWORD}
+
+APP_DB=${APP_DB}
+DBA_USER=${DBA_USER}
+DBA_PASSWORD=${DBA_PASSWORD}
+RW_USER=${RW_USER}
+RW_PASSWORD=${RW_PASSWORD}
+RO_USER=${RO_USER}
+RO_PASSWORD=${RO_PASSWORD}
+
+BACKUP_ENABLED=${BACKUP_ENABLED}
+BACKUP_PORT=${BACKUP_PORT}
+DBUTILS_BUILD_TARGET=${DBUTILS_BUILD_TARGET}
+
+HOST_DATA_DIR=${HOST_DATA_DIR}
+HOST_LOG_DIR=${HOST_LOG_DIR}
+HOST_BACKUP_DIR=${HOST_BACKUP_DIR}
+HOST_CONF_DIR=${HOST_CONF_DIR}
+HOST_INITDB_DIR=${HOST_INITDB_DIR}
+
+CONTAINER_DATA_DIR=${CONTAINER_DATA_DIR}
+CONTAINER_LOG_DIR=${CONTAINER_LOG_DIR}
+CONTAINER_BACKUP_DIR=${CONTAINER_BACKUP_DIR}
+CONTAINER_CONF_DIR=${CONTAINER_CONF_DIR}
+CONTAINER_INITDB_DIR=${CONTAINER_INITDB_DIR}
+ENVEOF
+ok "Wrote .env.local"
+
+# ----------------------------- prepare folders -------------------------------
+say
+say "${C_BOLD}Preparing host folders${C_RESET}"
+mkdir -p "${HOST_DATA_DIR}" "${HOST_LOG_DIR}"
+[ "${BACKUP_ENABLED}" = "true" ] && mkdir -p "${HOST_BACKUP_DIR}" || true
+chmod 700 "${HOST_DATA_DIR}" 2>/dev/null || true
+ok "DATA=${HOST_DATA_DIR}"
+ok "LOGS=${HOST_LOG_DIR}"
+[ "${BACKUP_ENABLED}" = "true" ] && ok "BACKUPS=${HOST_BACKUP_DIR}" || true
+
+# SELinux label if available
+if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != "Disabled" ]; then
+  warn "SELinux detected — applying labels to host dirs"
+  if [ "$USE_SUDO_DOCKER" = "true" ]; then
+    printf '%s\n' "$SUDO_PW" | sudo -S -p "" chcon -Rt svirt_sandbox_file_t "${HOST_DATA_DIR}" "${HOST_LOG_DIR}" 2>/dev/null || true
+    [ "${BACKUP_ENABLED}" = "true" ] && printf '%s\n' "$SUDO_PW" | sudo -S -p "" chcon -Rt svirt_sandbox_file_t "${HOST_BACKUP_DIR}" 2>/dev/null || true
+  else
+    sudo chcon -Rt svirt_sandbox_file_t "${HOST_DATA_DIR}" "${HOST_LOG_DIR}" 2>/dev/null || true
+    [ "${BACKUP_ENABLED}" = "true" ] && sudo chcon -Rt svirt_sandbox_file_t "${HOST_BACKUP_DIR}" 2>/dev/null || true
+  fi
+fi
+
+# ----------------------------- build & start ---------------------------------
+if [ "$NO_START" = "true" ]; then
+  warn "Skipping docker compose up (--no-start)."
+  exit 0
+fi
+
+if [ "$ASSUME_YES" = "true" ] || confirm "Build image now (target=${DBUTILS_BUILD_TARGET}) and start containers?"; then
+  export COMPOSE_PROFILES=""
+  [ "${BACKUP_ENABLED}" = "true" ] && export COMPOSE_PROFILES="backup" || true
+  say "${C_DIM}Running: docker compose build --pull --no-cache${C_RESET}"
+  compose_cmd build --pull --no-cache --build-arg BUILDKIT_INLINE_CACHE=1
+  say "${C_DIM}Running: docker compose up -d${C_RESET}"
+  compose_cmd up -d
+  ok "Containers started."
+else
+  warn "You can start later with: ./bin/pg up"
+  exit 0
+fi
+
+# ----------------------------- optional db-utils attach ----------------------
+if [ "${DBUTILS_BUILD_TARGET}" = "core" ]; then
+  say
+  warn "Image was built without db-utils."
+  if [ "$ASSUME_YES" = "true" ] || confirm "Attach db-utils (copy ./db-utils into running container) now?"; then
+    docker_cmd cp "./db-utils" "${PROJECT_NAME}:/opt/db-utils"
+    docker_cmd exec "${PROJECT_NAME}" sh -lc 'ln -sf /opt/db-utils/dbutil.sh /usr/local/bin/dbutil && chmod +x /usr/local/bin/dbutil /opt/db-utils/*.sh'
+    ok "db-utils attached."
+  else
+    warn "You can attach later with: ./bin/pg dbutils:attach"
+  fi
+fi
+
+# ----------------------------- verification ----------------------------------
+say
+say "${C_BOLD}Verifying database...${C_RESET}"
+export PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD}"
+if docker_cmd exec -e PGPASSWORD="${PGPASSWORD}" "${PROJECT_NAME}" psql -U postgres -d "${APP_DB}" -c "SELECT version();" >/dev/null 2>&1; then
+  ok "Database reachable. Showing installed extensions (if any):"
+  docker_cmd exec -e PGPASSWORD="${PGPASSWORD}" "${PROJECT_NAME}" psql -U postgres -d "${APP_DB}" -c "\dx" || true
+else
+  warn "Could not connect to ${APP_DB} yet. Give it a few seconds and run: ./bin/pg psql"
+fi
+
+say
+ok "Done."
+say "${C_BOLD}Next steps:${C_RESET}
+  - ${C_DIM}Open psql:${C_RESET}          ./bin/pg psql
+  - ${C_DIM}Enable backups:${C_RESET}      ./bin/pg backup:on
+  - ${C_DIM}Check mounts:${C_RESET}        ./bin/pg check
+  - ${C_DIM}Manage extensions:${C_RESET}   ./bin/pg add-ext ${APP_DB} \"postgis,pgvector\"
+"
