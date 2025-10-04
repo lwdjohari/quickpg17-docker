@@ -100,7 +100,7 @@ RUN set -e \
  # Your hardened configs are mounted by compose (RO) to /etc/postgresql
 # Your init scripts are mounted by compose to /docker-entrypoint-initdb.d
 
-VOLUME ["/var/lib/postgresql/data", "/var/log/postgresql"]
+VOLUME ["/var/lib/postgresql/data"]
 EXPOSE 5432
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=20 \
