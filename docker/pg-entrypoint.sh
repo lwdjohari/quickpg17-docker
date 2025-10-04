@@ -26,7 +26,6 @@ export PATH="${PGBIN}:${PATH}"
 # Your aliases and app vars (also default to empty)
 # : "${POSTGRES_SUPERUSER_PASSWORD:=}"
 # : "${POSTGRES_SUPERUSER_PASSWORD_FILE:=}"
-
 # : "${APP_DB:=}"
 # : "${DBA_USER:=}"
 # : "${DBA_PASSWORD:=}"
@@ -111,16 +110,15 @@ if [ "${1:-}" = "${PGBIN}/postgres" ] || [ "${1:-}" = "postgres" ]; then
   is_postgres_cmd=true
 fi
 
-# --- tiny helpers for psql with consistent flags & nice logging ---
-_psql(){
-  "${PGBIN}/psql" -v ON_ERROR_STOP=1 "$@"
-}
-_psqlA(){
-  # -A (unaligned), -t (tuples only)
-  "${PGBIN}/psql" -v ON_ERROR_STOP=1 -At "$@"
-}
+# --- resolve psql path robustly (Debian puts it in /usr/bin) ---
+PSQL_BIN="$(command -v psql || true)"
+if [ -z "${PSQL_BIN}" ] && [ -x "${PGBIN}/psql" ]; then
+  PSQL_BIN="${PGBIN}/psql"
+fi
+# tiny helpers for psql with consistent flags & nice logging (fail fast if no password available)
+_psql(){ "${PSQL_BIN}" --no-password -v ON_ERROR_STOP=1 "$@"; }
+_psqlA(){ "${PSQL_BIN}" --no-password -v ON_ERROR_STOP=1 -At "$@"; }
 _psql_log(){
-  # prints a heading and the command output indented for docker logs readability
   local heading="$1"; shift
   log "$heading"
   _psql "$@" | sed 's/^/  /'
@@ -160,7 +158,12 @@ if $is_postgres_cmd && [ -z "$wantHelp" ]; then
     "${PGBIN}/initdb" "${authArgs[@]}" "${initArgs[@]}"
     [ -n "${pwfile:-}" ] && rm -f "$pwfile"
 
-    # Start temp server for init scripts
+    # Make psql non-interactive for init time (SCRAM)
+    if [ -n "${POSTGRES_PASSWORD:-}" ]; then
+      export PGPASSWORD="${POSTGRES_PASSWORD}"
+    fi
+
+    # Start temp server for init scripts (socket-only)
     log "Starting temporary server for init scripts"
     "${PGBIN}/pg_ctl" -D "$PGDATA" -o "-c listen_addresses='' -c unix_socket_directories=/var/run/postgresql" -w start
 
@@ -254,7 +257,9 @@ if $is_postgres_cmd && [ -z "$wantHelp" ]; then
       log "----- End of Initialization Summary -----"
     fi
 
+    # Stop temp server; do not leak password env into runtime
     "${PGBIN}/pg_ctl" -D "$PGDATA" -m fast -w stop
+    unset PGPASSWORD
     log "Initialization complete"
   fi
 
@@ -270,8 +275,6 @@ if $is_postgres_cmd && [ -z "$wantHelp" ]; then
   if [ -f /etc/postgresql/postgresql.conf ]; then
     exec "${PGBIN}/postgres" -D "$PGDATA" -c config_file=/etc/postgresql/postgresql.conf "${log_flags[@]}"
   fi
-
-  # otherwise normal exec continues below
 fi
 
 # Fall-through: run what the user asked for (already normalized if postgres)
