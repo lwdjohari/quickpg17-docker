@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   pg:
     build:
@@ -11,7 +9,6 @@ services:
     restart: unless-stopped
     working_dir: /
     env_file:
-      - ./.env
       - ./.env.local
     environment:
       TZ: ${TZ:-UTC}
