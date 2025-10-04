@@ -4,7 +4,7 @@
 #
 # Features:
 #   - *_FILE secret support (e.g. POSTGRES_SUPERUSER_PASSWORD_FILE=.secrets/pg_superuser.pw)
-#   - Secret resolver (prefers inline > file); logs are sanitized for both modes
+#   - Secrets mode detection (inline vs file) to choose compose files automatically
 #   - Pre-compose configuration review & confirmation before up/up:rebuild
 #   - Dual logging: host + inside container
 #   - Consent prompts for risky ops
@@ -43,8 +43,8 @@ resolve_secret() {
     return 0
   fi
   # Else use file content if provided and readable
-  if [ -n "$file_path" ] && [ -r "$file_path" ]; then
-    local v; v="$(cat "$file_path")"
+  if [ -n "${file_path}" ] && [ -r "${file_path}" ]; then
+    local v; v="$(cat "${file_path}")"
     export "$var"="$v"
   fi
   return 0
@@ -60,6 +60,46 @@ export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-pg17}"
 HOST_DATA_DIR="${HOST_DATA_DIR:-${ROOT}/data}"
 HOST_LOG_DIR="${HOST_LOG_DIR:-${ROOT}/logs}"
 HOST_BACKUP_DIR="${HOST_BACKUP_DIR:-${ROOT}/backups}"
+HOST_CONF_DIR="${HOST_CONF_DIR:-${ROOT}/docker/conf}"
+HOST_INITDB_DIR="${HOST_INITDB_DIR:-${ROOT}/initdb}"
+
+CONTAINER_DATA_DIR="${CONTAINER_DATA_DIR:-/var/lib/postgresql/data}"
+CONTAINER_LOG_DIR="${CONTAINER_LOG_DIR:-/var/log/postgresql}"
+CONTAINER_BACKUP_DIR="${CONTAINER_BACKUP_DIR:-/backups}"
+CONTAINER_CONF_DIR="${CONTAINER_CONF_DIR:-/etc/postgresql}"
+CONTAINER_INITDB_DIR="${CONTAINER_INITDB_DIR:-/docker-entrypoint-initdb.d}"
+
+# -------------------------- secrets mode & compose files ----------------------
+# Consider "file mode" if SECRETS_MODE=file OR any *_FILE is present.
+secrets_mode_is_file() {
+  [ "${SECRETS_MODE:-}" = "file" ] || \
+  [ -n "${POSTGRES_SUPERUSER_PASSWORD_FILE:-}" ] || \
+  [ -n "${DBA_PASSWORD_FILE:-}" ] || \
+  [ -n "${RW_PASSWORD_FILE:-}" ]  || \
+  [ -n "${RO_PASSWORD_FILE:-}" ]
+}
+
+# docker compose wrapper that ALWAYS injects the right -f files
+docker_cmd() {
+  if $USE_SUDO_DOCKER; then
+    if $PRE_SUPPLY_SUDO && [ -n "${SUDO_PW:-}" ]; then
+      printf '%s\n' "$SUDO_PW" | sudo -S -p "" docker "$@"
+    else
+      sudo docker "$@"
+    fi
+  else
+    docker "$@"
+  fi
+}
+
+dc() {
+  # Compose files chosen dynamically by secrets mode
+  local files=(-f "${ROOT}/docker-compose.yaml")
+  if secrets_mode_is_file; then
+    files+=(-f "${ROOT}/docker-compose.secrets.yaml")
+  fi
+  docker_cmd compose --project-name "${COMPOSE_PROJECT_NAME}" "${files[@]}" "$@"
+}
 
 # -------------------------- flags --------------------------------------------
 USE_SUDO_DOCKER=false
@@ -75,20 +115,6 @@ for arg in "$@"; do
   esac
 done
 set -- "${NEWARGS[@]}"
-
-# -------------------------- docker wrappers ----------------------------------
-docker_cmd() {
-  if $USE_SUDO_DOCKER; then
-    if $PRE_SUPPLY_SUDO && [ -n "${SUDO_PW:-}" ]; then
-      printf '%s\n' "$SUDO_PW" | sudo -S -p "" docker "$@"
-    else
-      sudo docker "$@"
-    fi
-  else
-    docker "$@"
-  fi
-}
-dc() { docker_cmd compose --project-name "${COMPOSE_PROJECT_NAME}" "$@"; }
 
 # -------------------------- sudo presupply -----------------------------------
 if $USE_SUDO_DOCKER && $PRE_SUPPLY_SUDO; then
@@ -111,13 +137,9 @@ if $USE_SUDO_DOCKER && $PRE_SUPPLY_SUDO; then
 fi
 
 # ---------------------------- permissions ------------------------------------
-
-# Run the fix-perms script (kept for convenience)
 fix_perms() {
   bash permission-fix.sh
 }
-
-# Verify by showing file modes after fix
 check_perms() {
   echo "Fix permission for scripts and secrets:"
   bash permission-fix.sh
@@ -134,9 +156,11 @@ HOST_NAME="$(hostname -s 2>/dev/null || hostname)"
 
 sanitize() {
   local s="$*"
-  # redact inline & file-based secrets
   s="${s//POSTGRES_SUPERUSER_PASSWORD=*/POSTGRES_SUPERUSER_PASSWORD=***}"
   s="${s//POSTGRES_SUPERUSER_PASSWORD_FILE=*/POSTGRES_SUPERUSER_PASSWORD_FILE=***}"
+  s="${s//DBA_PASSWORD_FILE=*/DBA_PASSWORD_FILE=***}"
+  s="${s//RW_PASSWORD_FILE=*/RW_PASSWORD_FILE=***}"
+  s="${s//RO_PASSWORD_FILE=*/RO_PASSWORD_FILE=***}"
   s="${s//PGPASSWORD=*/PGPASSWORD=***}"
   s="${s//password=*/password=***}"
   s="${s//passwd=*/passwd=***}"
@@ -186,7 +210,6 @@ ensure_dirs(){
   mkdir -p "${HOST_CLI_DIR}" || true
   chmod 700 "${HOST_DATA_DIR}" 2>/dev/null || true
 }
-
 preflight(){
   ensure_dirs
   # Accept either plain or file-based secret (resolved at top)
@@ -213,7 +236,6 @@ Options:
 MSG
     exit 2
   fi
-  # Use resolved superuser password
   dc exec -u postgres -e PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD:-}" pg dbutil "$@"
 }
 
@@ -264,7 +286,15 @@ guard_identifier() {
   esac
 }
 
-# --------- config review (like quickpg-install) before compose actions -------
+compose_files_summary() {
+  if secrets_mode_is_file; then
+    echo "docker-compose.yaml + docker-compose.secrets.yaml"
+  else
+    echo "docker-compose.yaml"
+  fi
+}
+
+# --------- config review (like quickpg-build) before compose actions ---------
 review_config_and_confirm() {
   say ""
   say "${C_BOLD}Review configuration (compose will use this)${C_RESET}"
@@ -279,7 +309,7 @@ APP_DB:               ${APP_DB:-?}
 DBA_USER:             ${DBA_USER:-?}
 RW_USER:              ${RW_USER:-?}
 RO_USER:              ${RO_USER:-?}
-Secrets Mode:         $( [ -n "${POSTGRES_SUPERUSER_PASSWORD_FILE:-}" ] && echo "file-based (*_FILE)" || echo "inline env" )
+Secrets Mode:         $( secrets_mode_is_file && echo "file-based (*_FILE)" || echo "inline env" )
 
 # Backups
 BACKUP_ENABLED:       ${BACKUP_ENABLED:-false}
@@ -293,15 +323,17 @@ DBUTILS_BUILD_TARGET: ${DBUTILS_BUILD_TARGET:-core_dbutils}
 HOST_DATA_DIR:        ${HOST_DATA_DIR}
 HOST_LOG_DIR:         ${HOST_LOG_DIR}
 HOST_BACKUP_DIR:      ${HOST_BACKUP_DIR}
-HOST_CONF_DIR:        ${HOST_CONF_DIR:-./docker/conf}
-HOST_INITDB_DIR:      ${HOST_INITDB_DIR:-./initdb}
+HOST_CONF_DIR:        ${HOST_CONF_DIR}
+HOST_INITDB_DIR:      ${HOST_INITDB_DIR}
 
 # Container paths
-CONTAINER_DATA_DIR:   ${CONTAINER_DATA_DIR:-/var/lib/postgresql/data}
-CONTAINER_LOG_DIR:    ${CONTAINER_LOG_DIR:-/var/log/postgresql}
-CONTAINER_BACKUP_DIR: ${CONTAINER_BACKUP_DIR:-/backups}
-CONTAINER_CONF_DIR:   ${CONTAINER_CONF_DIR:-/etc/postgresql}
-CONTAINER_INITDB_DIR: ${CONTAINER_INITDB_DIR:-/docker-entrypoint-initdb.d}
+CONTAINER_DATA_DIR:   ${CONTAINER_DATA_DIR}
+CONTAINER_LOG_DIR:    ${CONTAINER_LOG_DIR}
+CONTAINER_BACKUP_DIR: ${CONTAINER_BACKUP_DIR}
+CONTAINER_CONF_DIR:   ${CONTAINER_CONF_DIR}
+CONTAINER_INITDB_DIR: ${CONTAINER_INITDB_DIR}
+
+Compose files:        $(compose_files_summary)
 CFG
 
   read -r -p "$(printf "%b?%b Proceed with docker compose? [y/N]: " "${C_BLUE}" "${C_RESET}")" resp < /dev/tty
@@ -344,7 +376,7 @@ case "$cmd" in
       if needs_dbutils; then ok "db-utils: present"; else warn "db-utils: NOT present"; fi ;;
   dbutils:attach)
       say "${C_CYAN}Attaching db-utils...${C_RESET}"
-      dc cp db-utils pg:/opt/db-utils || true
+      dc cp "${ROOT}/db-utils" pg:/opt/db-utils || true
       dc exec pg sh -lc 'ln -sf /opt/db-utils/dbutil.sh /usr/local/bin/dbutil && chmod +x /usr/local/bin/dbutil /opt/db-utils/*.sh'
       ok "db-utils attached." ;;
 
@@ -563,13 +595,14 @@ case "$cmd" in
 ${C_BOLD}Project:${C_RESET} ${COMPOSE_PROJECT_NAME}  ${C_BOLD}Port:${C_RESET} ${PG_PORT:-5432}  ${C_BOLD}TZ:${C_RESET} ${TZ:-UTC}
 ${C_BOLD}DB:${C_RESET} ${APP_DB:-?}  ${C_BOLD}Roles:${C_RESET} ${DBA_USER:-?}, ${RW_USER:-?}, ${RO_USER:-?}
 ${C_BOLD}Backups:${C_RESET} ${BACKUP_ENABLED:-false} (COMPOSE_PROFILES='${COMPOSE_PROFILES:-}')
-${C_BOLD}Secrets:${C_RESET} $( [ -n "${POSTGRES_SUPERUSER_PASSWORD_FILE:-}" ] && echo "file-based (*_FILE)" || echo "inline env" )
+${C_BOLD}Secrets:${C_RESET} $( secrets_mode_is_file && echo "file-based (*_FILE)" || echo "inline env" )
+${C_BOLD}Compose files:${C_RESET} $(compose_files_summary)
 ${C_BOLD}Mounts:${C_RESET}
-  DATA    => ${HOST_DATA_DIR} -> ${CONTAINER_DATA_DIR:-/var/lib/postgresql/data}
-  LOGS    => ${HOST_LOG_DIR}  -> ${CONTAINER_LOG_DIR:-/var/log/postgresql}
-  CONF    => ${HOST_CONF_DIR:-./docker/conf} -> ${CONTAINER_CONF_DIR:-/etc/postgresql} (ro)
-  INITDB  => ${HOST_INITDB_DIR:-./initdb}    -> ${CONTAINER_INITDB_DIR:-/docker-entrypoint-initdb.d} (ro)
-  BACKUPS => ${HOST_BACKUP_DIR} -> ${CONTAINER_BACKUP_DIR:-/backups} (sidecar)
+  DATA    => ${HOST_DATA_DIR} -> ${CONTAINER_DATA_DIR}
+  LOGS    => ${HOST_LOG_DIR}  -> ${CONTAINER_LOG_DIR}
+  CONF    => ${HOST_CONF_DIR} -> ${CONTAINER_CONF_DIR} (ro)
+  INITDB  => ${HOST_INITDB_DIR} -> ${CONTAINER_INITDB_DIR} (ro)
+  BACKUPS => ${HOST_BACKUP_DIR} -> ${CONTAINER_BACKUP_DIR} (sidecar)
 ${C_BOLD}DB-UTILS target:${C_RESET} ${DBUTILS_BUILD_TARGET:-core_dbutils}
 ${C_BOLD}SUDO mode:${C_RESET} $($USE_SUDO_DOCKER && echo "on" || echo "off")  (presupply=$($PRE_SUPPLY_SUDO && echo on || echo off))
 EOF
@@ -587,7 +620,7 @@ EOF
     log_event "event=help"
     cat <<EOF
     
-${C_YELLOW}pg-docker cli v1.1 - Manage quickpg17 docker container lifecycle with easy.${C_RESET}
+${C_YELLOW}pg-docker cli v1.1 - Manage quickpg17 docker container lifecycle with ease.${C_RESET}
 ${C_YELLOW}-----------------------------------------------------------------------${C_RESET}
 https://github.com/lwdjohari/quickpg17-docker
 Author: Linggawasistha Djohari, 2025.
@@ -600,15 +633,15 @@ ${C_YELLOW}Flags:${C_RESET}
 
 Docker:
   ${C_BLUE}check${C_RESET}            Check for project configurations 
-  ${C_BLUE}up${C_RESET}               Docker compose up, build docker image if not available
-  ${C_BLUE}up:rebuild${C_RESET}       Docker compose up and rebuild
+  ${C_BLUE}up${C_RESET}               Docker compose up (auto-selects compose files by secrets mode)
+  ${C_BLUE}up:rebuild${C_RESET}       Docker compose build --no-cache + up
   ${C_BLUE}down${C_RESET}             Docker compose down
-  ${C_BLUE}restart${C_RESET}          Docker reset the container
+  ${C_BLUE}restart${C_RESET}          Restart the container
   ${C_BLUE}status${C_RESET}           Show container status
-  ${C_BLUE}logs${C_RESET}             Show cointainer logs
-  ${C_BLUE}logs:backup${C_RESET}
-  ${C_BLUE}shell${C_RESET}
-  ${C_BLUE}psql${C_RESET}
+  ${C_BLUE}logs${C_RESET}             Show container logs
+  ${C_BLUE}logs:backup${C_RESET}      Show backup sidecar logs
+  ${C_BLUE}shell${C_RESET}            Exec into container shell
+  ${C_BLUE}psql${C_RESET}             psql as postgres to \$APP_DB
 
 Security:
   ${C_BLUE}fix-permission${C_RESET}   Fix scripts file permissions
@@ -616,9 +649,8 @@ Security:
 Postgres Utilities:
   ${C_BLUE}create-db  <db>${C_RESET}
   ${C_BLUE}create-dba <db> <DBA_USER>${C_RESET}
-  ${C_BLUE}create-rw  <db> <RW_USER>${C_RESET}      
-  ${C_BLUE}create-ro  <db> <RO_USER>${C_RESET}     
-  ${C_BLUE}lock-user  <USER_TO_LOCK> <DBA_USER>${C_RESET}      
+  ${C_BLUE}create-rw  <db> <RW_USER>${C_RESET}
+  ${C_BLUE}create-ro  <db> <RO_USER>${C_RESET}
   ${C_BLUE}add-ext    <db> "ext1,ext2"${C_RESET}    ${C_DIM}# schema via ext:schemaname${C_RESET}
   ${C_BLUE}drop-ext   <db> "ext1,ext2"${C_RESET}
   ${C_BLUE}list-ext   <db>${C_RESET}
@@ -652,10 +684,9 @@ ${C_DIM}Logging:${C_RESET}
   ${C_DIM}Container log: /opt/db-utils/logs/pg-docker-ops.log${C_RESET}
 
 ${C_DIM}Notes:${C_RESET}${C_DIM}
-  - Sensitive commands in pg-docker need sudo elevation for security & safety. 
+  - Secrets mode is auto-detected: inline (env) vs file-based (*_FILE). Compose files adjust automatically.
   - All commands usage are logged on the host and inside the container.
-  - All destructive/heavy operations print a risk summary and require typing YES.
-  - Ops prompt for DB user & hidden password (not stored).
+  - Destructive/heavy operations print a risk summary and require typing YES.
   - Use --sudo-docker (and optional --sudo-presupply) to run Docker via sudo.
 ${C_RESET}
 EOF
