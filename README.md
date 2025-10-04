@@ -2,7 +2,7 @@
 PostgreSQL 17 in a quick ready to use Docker Container (PostGIS • TimescaleDB • pgvector • Partman • Cron • Repack)
 
 > **Goal:** a production-grade Postgres 17 in Docker with the right extensions, **compose-immutable** (nobody needs to touch `docker-compose.yml`).  
-> **Control everything via** `.env` / `.env.local` + `./bin/pg-docker` + `Makefile`.
+> **Control everything via** `.env.local` + `./bin/pg-docker` + `Makefile`.
 
 
 
@@ -64,7 +64,7 @@ Use **`quickpg-build`** the builder interactive wizard for **quickpg17**.
 Usage: ./quickpg-build [--non-interactive] [--yes|-y] [--no-start] [--sudo-docker]
 ```
 
-**Generate** only the .env & .env.local
+**Generate** only the .env.local
 ```bash
 ./quickpg-build --no-start
 ```
@@ -82,7 +82,6 @@ Or if you want all manual control, follow this flow
 
 ```bash
 # Clone repo, enter folder
-cp .env.example .env                # then edit .env
 cp .env.local.example .env.local    # create .env.local for overrides
                                     # never commit the .env.local 
                                     # git-ignored overrides per env/user
@@ -106,7 +105,7 @@ cp .env.local.example .env.local    # create .env.local for overrides
 - **Do not edit** `docker-compose.yml`.
 - Build using interactive wizard **quickpg-build** or **./bin/pg-docker** cli.
 - Configure everything via:
-  - `.env` (defaults) + `.env.local` (overrides, git-ignored)
+  - `.env.local` (git-ignored)
   - `./bin/pg-docker` (team CLI) and/or `make` targets
 - You can change data/logs/backups/config/initdb **paths** via env only.
 
@@ -226,10 +225,8 @@ See examples in:
 ```
 quickpg17-docker/
 ├─ docker-compose.yaml
-├─ .env.example        # template; copy to .env
 ├─ .env.local.example  # template; copy to .env.local
-├─ .env                # committed defaults (safe, non-secrets)
-├─ .env.local          # git-ignored overrides per env/user
+├─ .env.local          # git-ignored env/user
 ├─ Makefile
 ├─ README.md
 ├─ bin/
@@ -271,7 +268,7 @@ quickpg17-docker/
 
 ## ⚙️ Configuration (Env)
 
-Create `.env` from `.env.example`, then override safely in `.env.local`.
+Create `.env.local` from `.env.local.example`, then configure safely in `.env.local`.
 
 ### Core
 

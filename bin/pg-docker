@@ -92,29 +92,30 @@ docker_cmd() {
   fi
 }
 
-# Load .env then .env.local (local wins) so Compose interpolation sees both
-load_compose_env() {
-  # shellcheck disable=SC1091
-  if [ -f "${ROOT}/.env" ]; then
-    set -a; . "${ROOT}/.env"; set +a
+# Require .env.local for docker compose interpolation (no .env fallback)
+compose_envfile_or_die() {
+  local envf="${ROOT}/.env.local"
+  if [ ! -f "$envf" ]; then
+    err ".env.local not found. Run quickpg-build to generate it."
+    exit 2
   fi
-  # shellcheck disable=SC1091
-  if [ -f "${ROOT}/.env.local" ]; then
-    set -a; . "${ROOT}/.env.local"; set +a
-  fi
+  printf "%s" "$envf"
 }
 
 dc() {
-  load_compose_env
-
-  # Compose files chosen dynamically by secrets mode
   local files=(-f "${ROOT}/docker-compose.yml")
   if secrets_mode_is_file; then
     files+=(-f "${ROOT}/docker-compose.secrets.yml")
   fi
 
+  local envf; envf="$(compose_envfile_or_die)"
+
   # run from repo root so relative paths in compose work
-  ( cd "${ROOT}" && docker_cmd compose --project-name "${COMPOSE_PROJECT_NAME}" "${files[@]}" "$@" )
+  ( cd "${ROOT}" \
+    && docker_cmd compose \
+         --project-name "${COMPOSE_PROJECT_NAME}" \
+         --env-file "${envf}" \
+         "${files[@]}" "$@" )
 }
 
 # -------------------------- flags --------------------------------------------
