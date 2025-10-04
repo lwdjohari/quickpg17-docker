@@ -1,4 +1,6 @@
-# ===== Runtime base (Bookworm everywhere; PGDG + Timescale repos) =====
+# ------------------------------------------------------------
+# Runtime base: Debian 12 + PGDG + Timescale repos
+# ------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime-base
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -19,10 +21,11 @@ RUN set -e \
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
-# PostgreSQL 17 + runtime extensions only (no toolchains)
+# PostgreSQL 17 + runtime extensions (no compilers)
 RUN set -e \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
+      gosu \
       postgresql-17 postgresql-client-17 postgresql-contrib-17 \
       postgresql-17-postgis-3 postgresql-17-postgis-3-scripts \
       timescaledb-2-postgresql-17 \
@@ -34,15 +37,15 @@ RUN set -e \
       postgresql-17-hypopg \
  && rm -rf /var/lib/apt/lists/*
 
-ENV PG_MAJOR=17 \
-    PGBIN=/usr/lib/postgresql/17/bin \
-    PGDATA=/var/lib/postgresql/17/main
+ENV PG_MAJOR=17
+ENV PGBIN=/usr/lib/postgresql/17/bin
+# Official default:
+ENV PGDATA=/var/lib/postgresql/data
 
 # ------------------------------------------------------------
-# Builder stage for pg_uuidv7 (kept out of final image)
+# Builder for pg_uuidv7 only (kept out of final image)
 # ------------------------------------------------------------
 FROM runtime-base AS uuidv7-builder
-
 RUN set -e \
  && apt-get update \
  && apt-get install -y --no-install-recommends build-essential git postgresql-server-dev-17 \
@@ -51,60 +54,45 @@ RUN set -e \
  && make -C /tmp/pg_uuidv7 install \
  && rm -rf /var/lib/apt/lists/*
 
-# Stage artifacts (use pg_config so paths are always correct)
-RUN set -e; \
-  libdir="$(pg_config --pkglibdir)"; \
-  sharedir="$(pg_config --sharedir)"; \
-  mkdir -p /staging/lib /staging/extension; \
-  cp -av "$libdir/pg_uuidv7.so" /staging/lib/; \
-  cp -av "$sharedir/extension/pg_uuidv7"* /staging/extension/
+# Stage artifacts (paths are created by `make install`)
+RUN set -e \
+ && mkdir -p /staging/lib /staging/extension \
+ && cp -a /usr/lib/postgresql/17/lib/uuidv7.so /staging/lib/ \
+ && cp -a /usr/share/postgresql/17/extension/uuidv7* /staging/extension/
 
 # ------------------------------------------------------------
 # Final image (production)
 # ------------------------------------------------------------
 FROM runtime-base AS core
 
-# Copy pg_uuidv7 artifacts only (no compilers in final)
-COPY --from=uuidv7-builder /staging/lib/pg_uuidv7.so \
-  /usr/lib/postgresql/17/lib/pg_uuidv7.so
-COPY --from=uuidv7-builder /staging/extension/pg_uuidv7* \
-  /usr/share/postgresql/17/extension/
+# pg_uuidv7 artifacts only
+COPY --from=uuidv7-builder /staging/lib/uuidv7.so /usr/lib/postgresql/17/lib/uuidv7.so
+COPY --from=uuidv7-builder /staging/extension/uuidv7* /usr/share/postgresql/17/extension/
 
-# Official-like entrypoint that honors *_FILE and runs initdb.d
-# --- bake default init scripts (will be overridden by a bind mount) ---
-# copy everything from repo initdb/ into the default init directory
-COPY initdb/ /docker-entrypoint-initdb.d/
-
-# sane perms: shell is executable; SQL files are read-only
-RUN find /docker-entrypoint-initdb.d -type f -name "*.sh"     -exec chmod 0755 {} \; && \
-    find /docker-entrypoint-initdb.d -type f -name "*.sql"    -exec chmod 0644 {} \; && \
-    find /docker-entrypoint-initdb.d -type f -name "*.sql.gz" -exec chmod 0644 {} \;
-
-
-# --- COPY config defaults from repo (can be overridden by bind-mount) ---
-# copies *contents* of repo ./docker/conf into /etc/postgresql
+# Your config + init scripts baked in (compose mounts can override)
 COPY docker/conf/ /etc/postgresql/
-RUN chmod 0644 /etc/postgresql/*
+COPY initdb/ /docker-entrypoint-initdb.d/
+# Ensure init shell scripts are executable
+RUN find /docker-entrypoint-initdb.d -type f -name '*.sh' -exec chmod +x {} + || true
 
-# --- Our entrypoint emulates the official flow (initdb + run hook scripts) ---
-# and always points postgres at the external conf path. If a bind-mount
-# overrides /etc/postgresql, that config wins automatically.
-COPY docker/pg-entrypoint.sh /usr/local/bin/pg-entrypoint
-RUN chmod +x /usr/local/bin/pg-entrypoint
+# Official-compatible entrypoint
+COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Your hardened configs are mounted by compose (RO) to /etc/postgresql
-# Your init scripts are mounted by compose to /docker-entrypoint-initdb.d
+# Pre-create common dirs (compose mounts may replace)
+RUN set -e \
+ && install -d -m 0700 -o postgres -g postgres /var/lib/postgresql/data \
+ && install -d -m 0755 -o postgres -g postgres /var/log/postgresql /var/run/postgresql
 
-VOLUME ["/var/lib/postgresql/17/main", "/var/log/postgresql"]
+VOLUME ["/var/lib/postgresql/data"]
 EXPOSE 5432
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=20 \
   CMD /usr/lib/postgresql/17/bin/pg_isready -U postgres -h 127.0.0.1 -p 5432 || exit 1
 
-# Always use external config path; bind-mount can override the files at runtime
-CMD ["/usr/local/bin/pg-entrypoint", "-c", "config_file=/etc/postgresql/postgresql.conf"
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["postgres"]
 
-ENTRYPOINT ["/usr/local/bin/pg-entrypoint"]
 
 FROM core AS core_dbutils
 # copy from repo root because build context is "."

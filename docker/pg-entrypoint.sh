@@ -1,126 +1,129 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-: "${PGDATA:=/var/lib/postgresql/17/main}"
+: "${PGDATA:=/var/lib/postgresql/data}"
 : "${PGBIN:=/usr/lib/postgresql/17/bin}"
 
-# ---------- helpers ----------
 log(){ echo "[entrypoint] $*"; }
 
-# Read secret: inline wins; else *_FILE; trims trailing whitespace
-read_secret() {
-  local var="$1" filevar="$2"
-  local v="${!var-}"
-  local f="${!filevar-}"
-  if [[ -n "$v" ]]; then printf "%s" "$v"; return 0; fi
-  if [[ -n "${f:-}" && -r "$f" ]]; then sed -e 's/[[:space:]]*$//' "$f"; return 0; fi
-  printf ""
-}
-
-# If VAR empty and VAR_FILE readable, export VAR=<file contents>
-resolve_file_to_inline() {
-  local var="$1" filevar="${1}_FILE"
-  if [[ -z "${!var-}" && -n "${!filevar-}" && -r "${!filevar}" ]]; then
-    # shellcheck disable=SC2086
-    export "$var"="$(sed -e 's/[[:space:]]*$//' "${!filevar}")"
-  fi
-}
-
-# ---------- dirs ----------
-install -d -o postgres -g postgres -m 700 "$PGDATA"
-install -d -o postgres -g postgres -m 775 /var/run/postgresql || true
-
-# ---------- env compatibility (official-like) ----------
-POSTGRES_USER="${POSTGRES_USER:-postgres}"
-# Official default: if POSTGRES_DB not set, default to POSTGRES_USER
-POSTGRES_DB="${POSTGRES_DB:-$POSTGRES_USER}"
-
-# Superuser password: prefer official env names, then your aliases
-SU_PASS="$( read_secret POSTGRES_PASSWORD POSTGRES_PASSWORD_FILE )"
-if [[ -z "$SU_PASS" ]]; then
-  SU_PASS="$( read_secret POSTGRES_SUPERUSER_PASSWORD POSTGRES_SUPERUSER_PASSWORD_FILE )"
-fi
-
-# Make downstream init scripts happy: expose effective inline values for app roles if *_FILE was used
-resolve_file_to_inline DBA_PASSWORD
-resolve_file_to_inline RW_PASSWORD
-resolve_file_to_inline RO_PASSWORD
-
-# Optional extras like official image
-POSTGRES_INITDB_ARGS="${POSTGRES_INITDB_ARGS:-}"
-POSTGRES_INITDB_WALDIR="${POSTGRES_INITDB_WALDIR:-}"
-
-# ---------- first-boot ----------
-if [[ ! -s "$PGDATA/PG_VERSION" ]]; then
-  if [[ -z "$SU_PASS" ]]; then
-    echo >&2 "ERROR: first run requires POSTGRES_PASSWORD or POSTGRES_PASSWORD_FILE (for ${POSTGRES_USER})."
+# --- official-style file_env helper (VAR / VAR_FILE) ---
+file_env() {
+  local var="$1"; local file_var="${var}_FILE"; local def="${2:-}"
+  if [ -n "${!var-}" ] && [ -n "${!file_var-}" ]; then
+    echo >&2 "error: both $var and $file_var are set (but are exclusive)"
     exit 1
   fi
-
-  log "Initializing cluster in $PGDATA (user=${POSTGRES_USER})"
-  tmp_pw="$(mktemp)"; chmod 600 "$tmp_pw"; printf "%s" "$SU_PASS" > "$tmp_pw"
-
-  # initdb args
-  initdb_args=( -D "$PGDATA" --username="$POSTGRES_USER" --pwfile="$tmp_pw"
-                --auth-local=scram-sha-256 --auth-host=scram-sha-256 )
-  if [[ -n "$POSTGRES_INITDB_WALDIR" ]]; then
-    install -d -o postgres -g postgres -m 700 "$POSTGRES_INITDB_WALDIR"
-    initdb_args+=( -X "$POSTGRES_INITDB_WALDIR" )
+  local val="$def"
+  if [ -n "${!var-}" ]; then
+    val="${!var}"
+  elif [ -n "${!file_var-}" ]; then
+    val="$(< "${!file_var}")"
   fi
-  if [[ -n "$POSTGRES_INITDB_ARGS" ]]; then
-    # split POSTGRES_INITDB_ARGS into array respecting spaces
-    # shellcheck disable=SC2206
-    extra_args=( $POSTGRES_INITDB_ARGS )
-    initdb_args+=( "${extra_args[@]}" )
-  fi
+  export "$var"="$val"
+  unset "$file_var"
+}
 
-  su -s /bin/sh -c "'$PGBIN/initdb' ${initdb_args[*]@Q}" postgres
-  rm -f "$tmp_pw"
+# Drop root to postgres (official images do this with gosu)
+if [ "$(id -u)" = '0' ]; then
+  # Fix dir ownership if mounted from host
+  install -d -m 0700 -o postgres -g postgres "$PGDATA"
+  install -d -m 0755 -o postgres -g postgres /var/run/postgresql
+  exec gosu postgres "$0" "$@"
+fi
 
-  # Start temporary server (socket only) for init scripts
-  # Use PGPASSWORD to authenticate with SCRAM
-  export PGPASSWORD="$SU_PASS"
-  su -s /bin/sh -c \
-    "'$PGBIN/pg_ctl' -D '$PGDATA' -o \"-c listen_addresses='' -c unix_socket_directories=/var/run/postgresql\" -w start" postgres
+# Now we are postgres user
+# Support official envs
+file_env 'POSTGRES_PASSWORD'
+file_env 'POSTGRES_USER' 'postgres'
+file_env 'POSTGRES_DB'
+file_env 'POSTGRES_INITDB_ARGS'
+file_env 'POSTGRES_INITDB_WALDIR'
+file_env 'POSTGRES_HOST_AUTH_METHOD'    # e.g., trust
 
-  # Create POSTGRES_DB when not "postgres" (official behavior creates when different)
-  if [[ "$POSTGRES_DB" != "postgres" ]]; then
-    log "Creating database ${POSTGRES_DB} owned by ${POSTGRES_USER}"
-    "$PGBIN/psql" -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" -d postgres -Atc \
-      "CREATE DATABASE \"${POSTGRES_DB}\" OWNER \"${POSTGRES_USER}\";"
-  fi
+# If arg starts with '-', prepend postgres
+if [ "${1:0:1}" = '-' ]; then
+  set -- postgres "$@"
+fi
 
-  # Run init scripts (official semantics)
-  if [[ -d /docker-entrypoint-initdb.d ]]; then
-    log "Running /docker-entrypoint-initdb.d scripts"
-    for f in /docker-entrypoint-initdb.d/*; do
+wantHelp=
+for arg; do
+  case "$arg" in
+    -h|--help|--version) wantHelp=1 ;;
+  esac
+done
+
+# Only init when running the server
+if [ "$1" = 'postgres' ] && [ -z "$wantHelp" ]; then
+  # Empty data dir?
+  if [ ! -s "$PGDATA/PG_VERSION" ]; then
+    if [ -z "$POSTGRES_PASSWORD" ] && [ "${POSTGRES_HOST_AUTH_METHOD:-}" != 'trust' ]; then
+      echo >&2 "error: database is uninitialized and POSTGRES_PASSWORD not set"
+      echo >&2 "  You must set POSTGRES_PASSWORD (or POSTGRES_PASSWORD_FILE) for the superuser."
+      echo >&2 "  Or set POSTGRES_HOST_AUTH_METHOD=trust (NOT recommended for production)."
+      exit 1
+    fi
+
+    log "Initializing database in $PGDATA (user=$POSTGRES_USER)"
+    # auth method selection per official semantics
+    authArgs=( --auth-local=scram-sha-256 --auth-host=scram-sha-256 )
+    if [ "${POSTGRES_HOST_AUTH_METHOD:-}" = 'trust' ]; then
+      authArgs=( --auth-local=trust --auth-host=trust )
+    fi
+
+    initArgs=( -D "$PGDATA" -U "$POSTGRES_USER" )
+    [ -n "$POSTGRES_INITDB_WALDIR" ] && initArgs+=( --waldir "$POSTGRES_INITDB_WALDIR" )
+    if [ -n "$POSTGRES_PASSWORD" ]; then
+      pwfile="$(mktemp)"; chmod 600 "$pwfile"; printf '%s' "$POSTGRES_PASSWORD" > "$pwfile"
+      initArgs+=( --pwfile="$pwfile" )
+    fi
+    # shellsplit POSTGRES_INITDB_ARGS
+    if [ -n "$POSTGRES_INITDB_ARGS" ]; then
+      # read into array safely
+      # shellcheck disable=SC2206
+      extra=( $POSTGRES_INITDB_ARGS )
+      initArgs+=( "${extra[@]}" )
+    fi
+
+    "$PGBIN"/initdb "${authArgs[@]}" "${initArgs[@]}"
+    [ -n "${pwfile:-}" ] && rm -f "$pwfile"
+
+    # Start temp server for init scripts
+    log "Starting temporary server for init scripts"
+    "$PGBIN"/pg_ctl -D "$PGDATA" -o "-c listen_addresses='' -c unix_socket_directories=/var/run/postgresql" -w start
+
+    # Create POSTGRES_DB if set and != postgres
+    if [ -n "$POSTGRES_DB" ] && [ "$POSTGRES_DB" != 'postgres' ]; then
+      log "Creating database $POSTGRES_DB owned by $POSTGRES_USER"
+      "$PGBIN"/psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -Atc \
+        "CREATE DATABASE \"${POSTGRES_DB}\" OWNER \"${POSTGRES_USER}\";"
+    fi
+
+    # Process initdb.d (official semantics)
+    process_init_file() {
+      local f="$1"
       case "$f" in
-        *.sh)
-          log "Executing $f"
-          # shellcheck disable=SC1090
-          . "$f"
-          ;;
-        *.sql)
-          log "Running $f"
-          "$PGBIN/psql" -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" -d "${POSTGRES_DB:-postgres}" -f "$f"
-          ;;
-        *.sql.gz)
-          log "Running $f (gz)"
-          gunzip -c "$f" | "$PGBIN/psql" -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" -d "${POSTGRES_DB:-postgres}"
-          ;;
-        *) log "Ignoring $f" ;;
+        *.sh)    log "Running $f"; . "$f" ;;
+        *.sql)   log "Running $f"; "$PGBIN"/psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "${POSTGRES_DB:-postgres}" -f "$f" ;;
+        *.sql.gz)log "Running $f (gz)"; gunzip -c "$f" | "$PGBIN"/psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "${POSTGRES_DB:-postgres}" ;;
+        *)       log "Ignoring $f" ;;
       esac
-    done
+    }
+
+    if [ -d /docker-entrypoint-initdb.d ]; then
+      log "Processing /docker-entrypoint-initdb.d"
+      find /docker-entrypoint-initdb.d -mindepth 1 -maxdepth 1 -print0 \
+      | sort -z \
+      | while IFS= read -r -d '' f; do process_init_file "$f"; done
+    fi
+
+    "$PGBIN"/pg_ctl -D "$PGDATA" -m fast -w stop
+    log "Initialization complete"
   fi
 
-  su -s /bin/sh -c "'$PGBIN/pg_ctl' -D '$PGDATA' -m fast -w stop" postgres
-  unset PGPASSWORD
+  # Prefer your mounted config if present
+  if [ -f /etc/postgresql/postgresql.conf ]; then
+    exec "$PGBIN"/postgres -D "$PGDATA" -c config_file=/etc/postgresql/postgresql.conf
+  fi
 fi
 
-# ---------- final server ----------
-# If you bind-mount /etc/postgresql, it wins; else baked config is used.
-if [[ -f /etc/postgresql/postgresql.conf ]]; then
-  exec "$PGBIN/postgres" -D "$PGDATA" -c config_file=/etc/postgresql/postgresql.conf
-else
-  exec "$PGBIN/postgres" -D "$PGDATA"
-fi
+exec "$@"
