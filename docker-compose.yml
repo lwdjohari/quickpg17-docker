@@ -3,7 +3,7 @@ version: "3.9"
 services:
   pg:
     build:
-      context: .   #repo root (so Dockerfile can COPY ../db-utils)
+      context: .
       dockerfile: ./docker/Dockerfile
       target: ${DBUTILS_BUILD_TARGET:-core_dbutils}
     image: org/pg17-full:latest
@@ -41,6 +41,9 @@ services:
     container_name: ${PROJECT_NAME:-pg17}-backups
     restart: unless-stopped
     depends_on: [pg]
+    env_file:
+      - ./.env
+      - ./.env.local
     environment:
       TZ: ${TZ:-UTC}
       PGHOST: pg
@@ -54,4 +57,8 @@ services:
       - "${HOST_BACKUP_DIR:-./backups}:${CONTAINER_BACKUP_DIR:-/backups}"
       - ./ops/backup/backup.sh:/usr/local/bin/backup.sh:ro
       - ./ops/backup/crontab:/etc/crontabs/root:ro
-    command: ["/bin/sh","-c","chmod +x /usr/local/bin/backup.sh && crond -f -l 8"]
+    command:
+      [
+        "/bin/sh","-c",
+        "chmod +x /usr/local/bin/backup.sh && crond -f -l 8"
+      ]

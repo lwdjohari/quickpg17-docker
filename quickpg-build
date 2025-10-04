@@ -40,9 +40,9 @@ else
   C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_RESET=""
 fi
 say()  { printf "%s\n" "$*"; }
-ok()   { printf "%b\n" "${C_GREEN}✔${C_RESET} $*"; }
-warn() { printf "%b\n" "${C_YELLOW}⚠${C_RESET} $*"; }
-err()  { printf "%b\n" "${C_RED}✖${C_RESET} $*" >&2; }
+ok()   { printf "%b\n" "${C_GREEN}OK${C_RESET} $*"; }
+warn() { printf "%b\n" "${C_YELLOW}WARN${C_RESET} $*"; }
+err()  { printf "%b\n" "${C_RED}ERR${C_RESET} $*" >&2; }
 
 # ----------------------------- args ------------------------------------------
 NONINTERACTIVE="false"
@@ -108,7 +108,6 @@ ask_password_twice() {
     read -r -s -p "$(printf "%b?%b Confirm %s: " "${C_BLUE}" "${C_RESET}" "$label")" p2; echo
     [[ -z "$p1" ]] && { warn "Empty password not allowed."; continue; }
     [[ "$p1" != "$p2" ]] && { err "Passwords do not match."; continue; }
-    # disallow newlines (breaks .env)
     if [[ "$p1" == *$'\n'* || "$p2" == *$'\n'* ]]; then err "Newlines not allowed in passwords."; continue; fi
     printf "%s" "$p1"; return
   done
@@ -130,7 +129,6 @@ docker_cmd() {
 compose_cmd(){ docker_cmd compose "$@"; }
 
 # ---------------------------- permissions ------------------------------------
-# Single visible function you asked for: run permission-fix and show modes.
 check_perms() {
   echo "Fix permission for scripts and secrets:"
   bash permission-fix.sh
@@ -138,13 +136,12 @@ check_perms() {
   ls -l bin/pg-docker quickpg-build permission-fix.sh db-utils/*.sh ops/backup/*.sh 2>/dev/null || true
 }
 
-# Consent gate: first run must accept to run check_perms() or exit.
 require_perms_consent() {
   local marker=".perms_consent"
   if [ -f "$marker" ]; then return 0; fi
   say ""
   say "${C_BOLD}Permission Fix Consent${C_RESET}"
-  say "This will run ${C_BOLD}permission-fix.sh${C_RESET} now to secure file/dir modes (scripts 700, secrets 600, etc.)."
+  say "This will run permission-fix.sh now to secure file/dir modes (scripts 700, secrets 600, etc.)."
   say "It only affects files in this repository workspace."
   if confirm "Do you consent to run the permission fix now?"; then
     check_perms
@@ -211,8 +208,9 @@ DBA_USER="${DBA_USER:-app_dba}"
 RW_USER="${RW_USER:-app_rw}"
 RO_USER="${RO_USER:-app_ro}"
 BACKUP_ENABLED="${BACKUP_ENABLED:-false}"
-BACKUP_PORT="${BACKUP_PORT:-5433}"          # fixed default
+BACKUP_PORT="${BACKUP_PORT:-5433}"
 DBUTILS_BUILD_TARGET="${DBUTILS_BUILD_TARGET:-core_dbutils}"
+SECRETS_MODE="${SECRETS_MODE:-}"            # inline | file
 
 HOST_DATA_DIR="${HOST_DATA_DIR:-./data}"
 HOST_LOG_DIR="${HOST_LOG_DIR:-./logs}"
@@ -237,6 +235,12 @@ say "${C_BOLD}Secrets storage mode${C_RESET}"
 USE_SECRET_FILES_DEF="false"
 USE_SECRET_FILES="$(ask "Store secrets via files (recommended) true/false" "$USE_SECRET_FILES_DEF")"
 case "${USE_SECRET_FILES,,}" in true|1|yes|y) USE_SECRET_FILES="true" ;; *) USE_SECRET_FILES="false" ;; esac
+# Normalize SECRETS_MODE for persistence & summaries
+if [ "$USE_SECRET_FILES" = "true" ]; then
+  SECRETS_MODE="file"
+else
+  SECRETS_MODE="inline"
+fi
 
 say ""
 say "${C_BOLD}Database & Roles configuration${C_RESET}"
@@ -256,7 +260,7 @@ if grep -qE '(_PASSWORD|POSTGRES_SUPERUSER)_FILE=' .env.local 2>/dev/null; then
 fi
 
 if [[ "$REUSE_SECRET_FILES" != "true" ]]; then
-  # Collect secrets inline (may later be written to files)
+  # Collect secrets inline first (may later be written to files)
   if [ -z "${POSTGRES_SUPERUSER_PASSWORD-}" ]; then
     if [ "$NONINTERACTIVE" = "true" ] && [ "$USE_SECRET_FILES" != "true" ]; then err "POSTGRES_SUPERUSER_PASSWORD required"; exit 2; fi
     POSTGRES_SUPERUSER_PASSWORD="$(ask_password_twice "Postgres superuser password")"
@@ -307,7 +311,7 @@ HOST_BACKUP_DIR="$(ask "Host BACKUP dir" "$HOST_BACKUP_DIR")"
 HOST_CONF_DIR="$(ask "Host CONF dir" "$HOST_CONF_DIR")"
 HOST_INITDB_DIR="$(ask "Host INITDB dir" "$HOST_INITDB_DIR")"
 
-# ------------------------ secrets via files (optional/new) --------------------
+# ------------------------ secrets via files (optional) ------------------------
 write_secret_file() {
   # write_secret_file VAR_NAME FILENAME CONTENT
   local var="$1" file="$2" val="$3"
@@ -348,6 +352,9 @@ RO_PASSWORD="${RO_PASSWORD//$'\n'/}"
   printf "DBA_USER=%s\n"                "$DBA_USER"
   printf "RW_USER=%s\n"                 "$RW_USER"
   printf "RO_USER=%s\n"                 "$RO_USER"
+
+  printf "\n# --- Secrets mode ---\n"
+  printf "SECRETS_MODE=%s\n"            "$SECRETS_MODE"
 
   if [[ "$USE_SECRET_FILES" == "true" ]]; then
     printf "POSTGRES_SUPERUSER_PASSWORD_FILE=%s\n" "${POSTGRES_SUPERUSER_PASSWORD_FILE:-}"
@@ -407,7 +414,7 @@ APP_DB:               ${APP_DB}
 DBA_USER:             ${DBA_USER}
 RW_USER:              ${RW_USER}
 RO_USER:              ${RO_USER}
-Secrets Mode:         $( [[ "$USE_SECRET_FILES" == "true" ]] && echo "files (*_FILE)" || echo "inline (.env.local)" )
+Secrets Mode:         ${SECRETS_MODE} $( [[ "$USE_SECRET_FILES" == "true" ]] && echo "(*_FILE via ./.secrets)" || echo "(inline in .env.local)" )
 Reused *_FILE:        $( [[ "$REUSE_SECRET_FILES" == "true" ]] && echo "yes" || echo "no" )
 
 # Backups
@@ -430,6 +437,7 @@ CONTAINER_LOG_DIR:    ${CONTAINER_LOG_DIR}
 CONTAINER_BACKUP_DIR: ${CONTAINER_BACKUP_DIR}
 CONTAINER_CONF_DIR:   ${CONTAINER_CONF_DIR}
 CONTAINER_INITDB_DIR: ${CONTAINER_INITDB_DIR}
+Compose files:        docker-compose.yaml$( [[ "$USE_SECRET_FILES" == "true" ]] && echo " + docker-compose.secrets.yaml" )
 CFG
 
 if ! confirm "Proceed to build image and start containers with the above settings?"; then
@@ -446,12 +454,17 @@ fi
 export COMPOSE_PROFILES=""
 [[ "$BACKUP_ENABLED" == "true" ]] && export COMPOSE_PROFILES="backup" || true
 
+COMPOSE_FILES=(-f docker-compose.yaml)
+if [ "$USE_SECRET_FILES" = "true" ]; then
+  COMPOSE_FILES+=(-f docker-compose.secrets.yaml)
+fi
+
 say ""
 say "${C_BOLD}Build & Start${C_RESET}"
-say "${C_DIM}Running: docker compose build --pull --no-cache${C_RESET}"
-compose_cmd build --pull --no-cache --build-arg BUILDKIT_INLINE_CACHE=1
-say "${C_DIM}Running: docker compose up -d${C_RESET}"
-compose_cmd up -d
+say "${C_DIM}Running: docker compose ${COMPOSE_FILES[*]} build --pull --no-cache${C_RESET}"
+docker_cmd compose "${COMPOSE_FILES[@]}" build --pull --no-cache --build-arg BUILDKIT_INLINE_CACHE=1
+say "${C_DIM}Running: docker compose ${COMPOSE_FILES[*]} up -d${C_RESET}"
+docker_cmd compose "${COMPOSE_FILES[@]}" up -d
 ok "Containers started."
 
 # ----------------------------- optional db-utils attach ----------------------
@@ -471,7 +484,6 @@ fi
 say ""
 say "${C_BOLD}Verifying database...${C_RESET}"
 if [[ "${USE_SECRET_FILES}" == "true" ]]; then
-  # If reusing, file vars may be empty if absent in .env.local; handle gracefully
   if [[ -n "${POSTGRES_SUPERUSER_PASSWORD_FILE:-}" && -f "${POSTGRES_SUPERUSER_PASSWORD_FILE:-}" ]]; then
     export PGPASSWORD="$(cat "$POSTGRES_SUPERUSER_PASSWORD_FILE")"
   else
