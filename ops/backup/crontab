@@ -1,0 +1,2 @@
+# m h dom mon dow
+15 3 * * * /usr/local/bin/backup.sh >> /var/log/cron.log 2>&1
