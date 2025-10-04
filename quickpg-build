@@ -4,7 +4,7 @@
 #
 # Purpose:
 #   - Secure-by-default: first-run consent to run permission fixer (via check_perms)
-#   - Configure .env/.env.local (optionally secrets via files with *_FILE)
+#   - Configure .env.local (optionally secrets via files with *_FILE)
 #   - Prepare host folders and correct permissions
 #   - Build and start the Docker stack WITHOUT editing docker-compose.yml
 #   - Offer db-utils baked-in or attach later
@@ -189,15 +189,28 @@ fi
 if ! docker_cmd version >/dev/null 2>&1; then err "Cannot run 'docker version'"; exit 2; fi
 if ! compose_cmd version >/dev/null 2>&1; then err "Docker Compose v2 (docker compose) not available"; exit 2; fi
 
-# ----------------------------- env bootstrap ---------------------------------
-[ -f ".env" ] || { [ -f ".env.example" ] && cp .env.example .env && ok "Created .env from template"; true; }
-[ -f ".env.local" ] || touch ".env.local"
+# ----------------------------- env bootstrap (strict .env.local only) -------
+# Seed .env.local from .env.local.example (if available), otherwise create empty
+if [ ! -f ".env.local" ]; then
+  if [ -f ".env.local.example" ]; then
+    cp .env.local.example .env.local
+    ok "Created .env.local from .env.local.example"
+  else
+    touch .env.local
+    warn "No .env.local.example found — created empty .env.local"
+  fi
+fi
 
+# Load ONLY .env.local (ignore .env/.env.example entirely)
 set -a
-. ".env.example" 2>/dev/null || true
-. ".env" 2>/dev/null || true
 . ".env.local" 2>/dev/null || true
 set +a
+
+# (Keep your in-script defaults below; they’ll fill anything not set in .env.local)
+# PROJECT_NAME="${PROJECT_NAME:-pg17}"
+# PG_PORT="${PG_PORT:-5432}"
+# ... etc.
+
 
 # Defaults
 PROJECT_NAME="${PROJECT_NAME:-pg17}"
