@@ -1,3 +1,4 @@
 .env.local
 logs/
 logs/cli/pg-docker-usage.log
+.secrets
