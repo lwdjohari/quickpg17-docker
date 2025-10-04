@@ -69,7 +69,7 @@ COPY --from=uuidv7-builder /staging/lib/pg_uuidv7.so \
   /usr/lib/postgresql/17/lib/pg_uuidv7.so
 COPY --from=uuidv7-builder /staging/extension/pg_uuidv7* \
   /usr/share/postgresql/17/extension/
-  
+
 # Official-like entrypoint that honors *_FILE and runs initdb.d
 # --- bake default init scripts (will be overridden by a bind mount) ---
 # copy everything from repo initdb/ into the default init directory
@@ -109,6 +109,16 @@ ENTRYPOINT ["/usr/local/bin/pg-entrypoint"]
 FROM core AS core_dbutils
 # copy from repo root because build context is "."
 COPY db-utils /opt/db-utils
-RUN chmod -R a+rX /opt/db-utils && \
-    ln -sf /opt/db-utils/dbutil.sh /usr/local/bin/dbutil && \
-    chmod +x /usr/local/bin/dbutil /opt/db-utils/*.sh
+
+# Make all scripts executable and create a stable /usr/local/bin/dbutil shim
+RUN set -e; \
+  install -d /usr/local/bin; \
+  chmod -R a+rX /opt/db-utils; \
+  find /opt/db-utils -type f -name '*.sh' -exec chmod +x {} +; \
+  # pick the correct entry script (repo uses db-utils.sh; some repos use dbutil.sh)
+  entry=""; \
+  for c in dbutil.sh db-utils.sh dbutils.sh; do \
+    if [ -f "/opt/db-utils/$c" ]; then entry="/opt/db-utils/$c"; break; fi; \
+  done; \
+  [ -n "$entry" ] || { echo "ERROR: no dbutils entry script found in /opt/db-utils"; ls -la /opt/db-utils; exit 1; }; \
+  ln -sf "$entry" /usr/local/bin/dbutil
