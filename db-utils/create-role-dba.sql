@@ -1,0 +1,26 @@
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'DBA_USER') THEN
+    EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L CREATEDB CREATEROLE;', :'DBA_USER', :'DBA_PASSWORD');
+  END IF;
+END $$;
+
+DO $$ DECLARE owner_name text; BEGIN
+  SELECT pg_get_userbyid(datdba) INTO owner_name FROM pg_database WHERE datname = :'DB_NAME';
+  IF owner_name IS DISTINCT FROM :'DBA_USER' THEN
+    EXECUTE format('ALTER DATABASE %I OWNER TO %I;', :'DB_NAME', :'DBA_USER');
+  END IF;
+END $$;
+
+\connect :"DB_NAME"
+
+DO $$ DECLARE s text; BEGIN
+  FOREACH s IN ARRAY regexp_split_to_array(:'SCHEMAS','\s*,\s*') LOOP
+    IF s IS NULL OR length(s)=0 THEN CONTINUE; END IF;
+    EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I;', s);
+    EXECUTE format('ALTER SCHEMA %I OWNER TO %I;', s, :'DBA_USER');
+    EXECUTE format('GRANT ALL ON SCHEMA %I TO %I;', s, :'DBA_USER');
+    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT ALL ON TABLES    TO %I;', s, :'DBA_USER');
+    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT ALL ON SEQUENCES TO %I;', s, :'DBA_USER');
+    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT ALL ON FUNCTIONS TO %I;', s, :'DBA_USER');
+  END LOOP;
+END $$;

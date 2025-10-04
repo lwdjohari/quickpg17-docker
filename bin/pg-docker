@@ -1,0 +1,541 @@
+#!/usr/bin/env bash
+# bin/pg-docker — colorful, ops-first CLI with dual logging (host + container)
+
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# -------------------------- color helpers ------------------------------------
+supports_color() { [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" ]]; }
+if supports_color; then
+  C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'; C_RED=$'\e[31m'; C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_BLUE=$'\e[34m'; C_MAG=$'\e[35m'; C_CYAN=$'\e[36m'; C_RESET=$'\e[0m'
+else
+  C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_MAG=""; C_CYAN=""; C_RESET=""
+fi
+say()  { printf "%s\n" "$*"; }
+ok()   { printf "%b\n" "${C_GREEN}✔${C_RESET} $*"; }
+warn() { printf "%b\n" "${C_YELLOW}⚠${C_RESET} $*"; }
+err()  { printf "%b\n" "${C_RED}✖${C_RESET} $*" >&2; }
+
+# -------------------------- load env -----------------------------------------
+[ -f "${ROOT}/.env" ]       && set -a && . "${ROOT}/.env" && set +a
+[ -f "${ROOT}/.env.local" ] && set -a && . "${ROOT}/.env.local" && set +a
+
+if [ "${BACKUP_ENABLED:-false}" = "true" ]; then export COMPOSE_PROFILES=backup; else export COMPOSE_PROFILES=; fi
+export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-pg17}"
+
+HOST_DATA_DIR="${HOST_DATA_DIR:-${ROOT}/data}"
+HOST_LOG_DIR="${HOST_LOG_DIR:-${ROOT}/logs}"
+HOST_BACKUP_DIR="${HOST_BACKUP_DIR:-${ROOT}/backups}"
+
+# -------------------------- flags --------------------------------------------
+USE_SUDO_DOCKER=false
+PRE_SUPPLY_SUDO=false
+SUDO_PW=""
+
+NEWARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --sudo-docker)    USE_SUDO_DOCKER=true ;;
+    --sudo-presupply) PRE_SUPPLY_SUDO=true ;;
+    *) NEWARGS+=("$arg") ;;
+  esac
+done
+set -- "${NEWARGS[@]}"
+
+# -------------------------- docker wrappers ----------------------------------
+docker_cmd() {
+  if $USE_SUDO_DOCKER; then
+    if $PRE_SUPPLY_SUDO && [ -n "${SUDO_PW:-}" ]; then
+      printf '%s\n' "$SUDO_PW" | sudo -S -p "" docker "$@"
+    else
+      sudo docker "$@"
+    fi
+  else
+    docker "$@"
+  fi
+}
+dc() { docker_cmd compose --project-name "${COMPOSE_PROJECT_NAME}" "$@"; }
+
+# -------------------------- sudo presupply -----------------------------------
+if $USE_SUDO_DOCKER && $PRE_SUPPLY_SUDO; then
+  prompt_sudo_pw() {
+    local p1 p2
+    while true; do
+      read -r -s -p "${C_BLUE}sudo password${C_RESET}: " p1 < /dev/tty; echo
+      read -r -s -p "${C_BLUE}Confirm sudo password${C_RESET}: " p2 < /dev/tty; echo
+      [ -z "$p1" ] && { err "Empty not allowed."; continue; }
+      [ "$p1" != "$p2" ] && { err "Mismatch, try again."; continue; }
+      printf "%s" "$p1"; return 0
+    done
+  }
+  SUDO_PW="$(prompt_sudo_pw)"
+  if printf '%s\n' "$SUDO_PW" | sudo -S -p "" -v >/dev/null 2>&1; then
+    ok "sudo credentials cached"
+  else
+    err "sudo authentication failed"; exit 2
+  fi
+fi
+
+# -------------------------- logging (host + container) -----------------------
+HOST_CLI_DIR="${HOST_LOG_DIR}/cli"
+HOST_LOG_FILE="${HOST_CLI_DIR}/pg-docker-usage.log"
+NOW_UTC() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+USER_NAME="$(id -un 2>/dev/null || whoami)"
+HOST_NAME="$(hostname -s 2>/dev/null || hostname)"
+
+sanitize() {
+  # scrub common secret patterns if they ever appear
+  local s="$*"
+  s="${s//POSTGRES_SUPERUSER_PASSWORD=*/POSTGRES_SUPERUSER_PASSWORD=***}"
+  s="${s//PGPASSWORD=*/PGPASSWORD=***}"
+  s="${s//password=*/password=***}"
+  s="${s//passwd=*/passwd=***}"
+  s="${s//pwd=*/pwd=***}"
+  # collapse whitespace
+  printf "%s" "$s" | tr '\n\r\t' '   '
+}
+
+log_host() {
+  local line="$1"
+  mkdir -p "${HOST_CLI_DIR}" 2>/dev/null || true
+  printf "%s\n" "$line" >> "${HOST_LOG_FILE}" 2>/dev/null || true
+}
+
+log_container() {
+  local line="$1"
+  # base64 the line so quoting stays safe
+  local b64
+  b64="$(printf '%s' "$line" | base64 | tr -d '\n')"
+  dc exec -T pg sh -lc '
+    set -e
+    mkdir -p /opt/db-utils/logs
+    chown -R postgres:postgres /opt/db-utils/logs || true
+    printf "%s" "'"$b64"'" | base64 -d >> /opt/db-utils/logs/pg-docker-ops.log
+  ' >/dev/null 2>&1 || true
+}
+
+log_both() {
+  local msg="$1"
+  log_host "$msg"
+  log_container "$msg"
+}
+
+log_event() {
+  # log_event "key=value ..." (auto adds ts,user,host,project)
+  local extra="$(sanitize "$*")"
+  local base="ts=$(NOW_UTC) user=${USER_NAME} host=${HOST_NAME} project=${COMPOSE_PROJECT_NAME}"
+  log_both "${base} ${extra}"
+}
+
+log_consent() {
+  # log consent with title
+  local title="$1"
+  log_event "event=consent title=$(sanitize "$title") status=accepted"
+}
+
+# -------------------------- utils --------------------------------------------
+ensure_dirs(){
+  mkdir -p "${HOST_DATA_DIR}" "${HOST_LOG_DIR}"
+  [ "${BACKUP_ENABLED:-false}" = "true" ] && mkdir -p "${HOST_BACKUP_DIR}" || true
+  mkdir -p "${HOST_CLI_DIR}" || true
+  chmod 700 "${HOST_DATA_DIR}" 2>/dev/null || true
+}
+preflight(){
+  ensure_dirs
+  [ -n "${POSTGRES_SUPERUSER_PASSWORD:-}" ] || { err "Set POSTGRES_SUPERUSER_PASSWORD in .env/.env.local"; exit 2; }
+}
+
+needs_dbutils(){
+  dc exec -T pg sh -lc 'command -v dbutil >/dev/null 2>&1' >/dev/null 2>&1
+}
+
+dbexec(){
+  if ! needs_dbutils; then
+    cat <<'MSG'
+db-utils not present in container.
+Options:
+  1) Rebuild with db-utils baked in:
+       echo "DBUTILS_BUILD_TARGET=core_dbutils" >> .env.local
+       ./bin/pg-docker --sudo-docker up:rebuild
+  2) Attach db-utils into the running container:
+       ./bin/pg-docker --sudo-docker dbutils:attach
+MSG
+    exit 2
+  fi
+  dc exec -u postgres -e PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD:-}" pg dbutil "$@"
+}
+
+prompt_password_twice() {
+  local label="${1:-Password}" p1 p2
+  while true; do
+    read -r -s -p "${C_BLUE}${label}${C_RESET}: " p1 < /dev/tty; echo
+    read -r -s -p "${C_BLUE}Confirm ${label}${C_RESET}: " p2 < /dev/tty; echo
+    [ -z "$p1" ] && { warn "Password cannot be empty."; continue; }
+    [ "$p1" != "$p2" ] && { err "Passwords do not match."; continue; }
+    printf "%s" "$p1"; return 0
+  done
+}
+
+prompt_db_creds() {
+  read -r -p "${C_BLUE}DB username${C_RESET}: " DBUSER < /dev/tty
+  read -r -s -p "${C_BLUE}DB password${C_RESET}: " DBPASS < /dev/tty; echo
+}
+
+psql_exec() {
+  local DB="$1"; shift
+  local SQL="$*"
+  dc exec -T -e PGPASSWORD="${DBPASS:-}" pg psql -v ON_ERROR_STOP=1 -U "${DBUSER}" -d "${DB}" -Atc "${SQL}"
+}
+
+psql_file() {
+  local DB="$1"; shift
+  local FILE="$1"
+  dc exec -T -e PGPASSWORD="${DBPASS:-}" pg psql -v ON_ERROR_STOP=1 -U "${DBUSER}" -d "${DB}" -f "${FILE}"
+}
+
+confirm_risk() {
+  local title="$1"; shift
+  local text="$*"
+  printf "%b\n" "${C_RED}${C_BOLD}------------------------------------------------------------${C_RESET}"
+  printf "%b\n" "${C_RED}${C_BOLD}RISK:${C_RESET} ${C_RED}${title}${C_RESET}"
+  printf "%b\n" "${C_RED}${C_BOLD}------------------------------------------------------------${C_RESET}"
+  printf "%b\n" "${C_RED}${text}${C_RESET}"
+  printf "%b\n" "${C_RED}${C_BOLD}------------------------------------------------------------${C_RESET}"
+  read -r -p "Type ${C_BOLD}YES${C_RESET} to proceed: " ans < /dev/tty
+  [ "${ans}" = "YES" ] || { warn "Aborted."; exit 1; }
+  log_consent "$title"
+}
+
+guard_identifier() {
+  case "$1" in
+    *";"*|*"--"*|*"/*"*"*/"*) err "Invalid identifier: $1"; exit 2 ;;
+  esac
+}
+
+# -------------------------- command dispatch ---------------------------------
+cmd="${1:-help}"; shift || true
+ORIG_ARGS="${cmd} $*"
+log_event "event=invoke cmd=${cmd} args='$(sanitize "$*")'"
+
+case "$cmd" in
+  up)            preflight; ok "Starting containers..."; dc up -d; ok "Done." ;;
+  up:rebuild)    preflight; warn "Rebuilding image (no cache) ..."; dc build --pull --no-cache; ok "Starting..."; dc up -d; ok "Done." ;;
+  down)          warn "Stopping & removing containers..."; dc down; ok "Down." ;;
+  stop)          warn "Stopping..."; dc stop; ok "Stopped." ;;
+  restart)       warn "Restarting pg..."; dc restart pg; ok "Restarted." ;;
+  ps|status)     dc ps ;;
+  logs)          dc logs -f pg ;;
+  logs:backup)   dc logs -f ${COMPOSE_PROJECT_NAME}-backups || dc logs -f pgbackups ;;
+  shell)         say "${C_CYAN}Entering container shell...${C_RESET}"; dc exec pg bash ;;
+  psql)          dc exec -e PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD}" pg psql -U postgres -d "${APP_DB:-postgres}" ;;
+
+  # db-utils
+  dbutils:present)
+      if needs_dbutils; then ok "db-utils: present"; else warn "db-utils: NOT present"; fi ;;
+  dbutils:attach)
+      say "${C_CYAN}Attaching db-utils...${C_RESET}"
+      dc cp db-utils pg:/opt/db-utils || true
+      dc exec pg sh -lc 'ln -sf /opt/db-utils/dbutil.sh /usr/local/bin/dbutil && chmod +x /usr/local/bin/dbutil /opt/db-utils/*.sh'
+      ok "db-utils attached." ;;
+
+  dbutil) dbexec "$@" ;;
+
+  # create DB/roles (passwords never logged)
+  create-db)
+      DB="${1:?DB_NAME required}"
+      log_event "event=create-db db=${DB}"
+      dbexec create-db "${DB}" ;;
+  create-dba)
+      DB="${1:?DB_NAME required}"; USERNAME="${2:?DBA_USER required}"
+      log_event "event=create-dba db=${DB} user=${USERNAME}"
+      PW="$(prompt_password_twice "DBA password")"
+      dbexec create-dba "${DB}" "${USERNAME}" "${PW}" ;;
+  create-rw)
+      DB="${1:?DB_NAME required}"; USERNAME="${2:?RW_USER required}"
+      log_event "event=create-rw db=${DB} user=${USERNAME}"
+      PW="$(prompt_password_twice "RW password")"
+      dbexec create-rw "${DB}" "${USERNAME}" "${PW}" ;;
+  create-ro)
+      DB="${1:?DB_NAME required}"; USERNAME="${2:?RO_USER required}"
+      log_event "event=create-ro db=${DB} user=${USERNAME}"
+      PW="$(prompt_password_twice "RO password")"
+      dbexec create-ro "${DB}" "${USERNAME}" "${PW}" ;;
+
+  add-ext)
+      DB="${1:?DB_NAME}"; EXTS="${2:?extensions,csv}"
+      log_event "event=add-ext db=${DB} exts='$(sanitize "$EXTS")'"
+      dbexec add-ext "${DB}" "${EXTS}" ;;
+  drop-ext)
+      DB="${1:?DB_NAME}"; EXTS="${2:?extensions,csv}"
+      log_event "event=drop-ext db=${DB} exts='$(sanitize "$EXTS")'"
+      dbexec drop-ext "${DB}" "${EXTS}" ;;
+  list-ext)
+      DB="${1:?DB_NAME}"
+      log_event "event=list-ext db=${DB}"
+      dbexec list-ext "${DB}" ;;
+
+  # ========================= OPS =========================
+  ops:health)
+      DB="${1:?DB required}"
+      log_event "event=ops:health db=${DB}"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT now();"
+      psql_exec "$DB" "SELECT 1;"
+      ok "OK." ;;
+
+  ops:stats:top)
+      DB="${1:?DB required}"; N="${2:-10}"
+      log_event "event=ops:stats:top db=${DB} limit=${N}"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT query,total_exec_time,calls,mean_exec_time,rows FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT ${N};" ;;
+
+  ops:stats:reset)
+      DB="${1:?DB required}"
+      confirm_risk "Reset pg_stat_statements" "Resets accumulated query stats. Irreversible for the current window; dashboards lose history."
+      log_event "event=ops:stats:reset db=${DB}"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT pg_stat_statements_reset();" ;;
+
+  ops:analyze)
+      DB="${1:?DB required}"; OBJ="${2:-}"
+      [ -z "$OBJ" ] && confirm_risk "ANALYZE DB" "Safe but IO/CPU heavy on large DBs." || confirm_risk "ANALYZE ${OBJ}" "Safe; heavy on big tables."
+      log_event "event=ops:analyze db=${DB} obj='${OBJ:-ALL}'"
+      prompt_db_creds
+      if [ -z "$OBJ" ]; then psql_exec "$DB" "ANALYZE;"; else guard_identifier "$OBJ"; psql_exec "$DB" "ANALYZE ${OBJ};"; fi ;;
+
+  ops:vacuum:analyze)
+      DB="${1:?DB required}"; OBJ="${2:-}"
+      [ -z "$OBJ" ] && confirm_risk "VACUUM (ANALYZE) DB" "Reclaims dead tuples & updates stats. IO heavy; brief locks may occur." \
+                     || confirm_risk "VACUUM (ANALYZE) ${OBJ}" "IO heavy; brief locks possible."
+      log_event "event=ops:vacuum:analyze db=${DB} obj='${OBJ:-ALL}'"
+      prompt_db_creds
+      if [ -z "$OBJ" ]; then psql_exec "$DB" "VACUUM (ANALYZE);"; else guard_identifier "$OBJ"; psql_exec "$DB" "VACUUM (ANALYZE) ${OBJ};"; fi ;;
+
+  ops:reindex)
+      DB="${1:?DB required}"; TARGET="${2:?<schema|schema.table> required}"
+      guard_identifier "$TARGET"
+      confirm_risk "REINDEX ${TARGET}" "Locks target; concurrent ops may block. Prefer off-hours."
+      log_event "event=ops:reindex db=${DB} target=${TARGET}"
+      prompt_db_creds
+      if [[ "$TARGET" == *.* ]]; then psql_exec "$DB" "REINDEX (VERBOSE) TABLE ${TARGET};"; else psql_exec "$DB" "REINDEX (VERBOSE) SCHEMA ${TARGET};"; fi ;;
+
+  ops:repack)
+      DB="${1:?DB required}"; TABLE="${2:?schema.table required}"
+      guard_identifier "$TABLE"
+      confirm_risk "pg_repack ${TABLE}" "Online reorg; brief locks at start/finish. Needs pg_repack."
+      log_event "event=ops:repack db=${DB} table=${TABLE}"
+      prompt_db_creds
+      dc exec -T -e PGPASSWORD="${DBPASS:-}" pg pg_repack --host 127.0.0.1 --port 5432 --username "${DBUSER}" --dbname "${DB}" --table "${TABLE}" ;;
+
+  ops:bloat:estimate)
+      DB="${1:?DB required}"; TABLE="${2:?schema.table required}"
+      guard_identifier "$TABLE"
+      log_event "event=ops:bloat:estimate db=${DB} table=${TABLE}"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT * FROM pgstattuple('${TABLE}');" ;;
+
+  ops:conn:list)
+      DB="${1:?DB required}"
+      log_event "event=ops:conn:list db=${DB}"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT pid,usename,client_addr,application_name,state,query_start,wait_event,LEFT(query,120) AS query FROM pg_stat_activity WHERE datname=current_database() ORDER BY state,query_start;" ;;
+
+  ops:kill:idle)
+      DB="${1:?DB required}"; MINUTES="${2:?minutes required}"
+      confirm_risk "Terminate idle sessions > ${MINUTES}m" "Terminates client connections idle beyond threshold. Users may lose unsaved work."
+      log_event "event=ops:kill:idle db=${DB} minutes=${MINUTES}"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND state='idle' AND now()-state_change > interval '${MINUTES} minutes' AND pid <> pg_backend_pid();" ;;
+
+  ops:wal:switch)
+      DB="${1:?DB required}"
+      confirm_risk "Force WAL segment switch" "Usually safe; may spike replication/archival traffic."
+      log_event "event=ops:wal:switch db=${DB}"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT pg_switch_wal();" ;;
+
+  ops:backup:now)
+      DB="${1:?DB required}"
+      confirm_risk "On-demand pg_dump (custom format)" "Adds IO/CPU load proportional to DB size. Safe, but heavy on large DBs."
+      log_event "event=ops:backup:now db=${DB}"
+      prompt_db_creds
+      TS="$(date -u +%Y%m%dT%H%M%SZ)"
+      OUT="${CONTAINER_BACKUP_DIR:-/backups}/${DB}-${TS}.dump"
+      dc exec -T -e PGPASSWORD="${DBPASS:-}" pg pg_dump -Fc -h 127.0.0.1 -p 5432 -U "${DBUSER}" -d "${DB}" -f "${OUT}"
+      ok "Backup written to host: ${HOST_BACKUP_DIR}/${DB}-${TS}.dump" ;;
+
+  ops:restore:file)
+      DB="${1:?target DB required}"; SRC="${2:?host backup file path or name required}"
+      BASENAME="$(basename "$SRC")"
+      HOST_FILE="$SRC"
+      [ -f "$HOST_FILE" ] || HOST_FILE="${HOST_BACKUP_DIR}/${BASENAME}"
+      [ -f "$HOST_FILE" ] || { err "File not found: $SRC (or ${HOST_BACKUP_DIR}/${BASENAME})"; exit 2; }
+      confirm_risk "Restore into ${DB} from ${BASENAME}" "DESTRUCTIVE if restoring over existing data. Off-hours recommended."
+      log_event "event=ops:restore:file db=${DB} file=${BASENAME}"
+      prompt_db_creds
+      dc cp "${HOST_FILE}" pg:"${CONTAINER_BACKUP_DIR:-/backups}/${BASENAME}"
+      if [[ "$BASENAME" == *.dump ]]; then
+        dc exec -T -e PGPASSWORD="${DBPASS:-}" pg pg_restore -h 127.0.0.1 -p 5432 -U "${DBUSER}" -d "${DB}" --clean --if-exists "${CONTAINER_BACKUP_DIR:-/backups}/${BASENAME}"
+      else
+        dc exec -T -e PGPASSWORD="${DBPASS:-}" pg psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -p 5432 -U "${DBUSER}" -d "${DB}" -f "${CONTAINER_BACKUP_DIR:-/backups}/${BASENAME}"
+      fi
+      ok "Restore completed into ${DB}." ;;
+
+  ops:cron:list)
+      DB="${1:?DB required}"
+      log_event "event=ops:cron:list db=${DB}"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT jobid,jobname,schedule,command,last_run_status,last_run_started FROM cron.job ORDER BY jobid;" ;;
+
+  ops:cron:add)
+      DB="${1:?DB required}"; NAME="${2:?job name in quotes}"; SCHED="${3:?crontab expr in quotes}"; SQLTXT="${4:?SQL in quotes}"
+      confirm_risk "Add pg_cron job '${NAME}'" "Schedules SQL to run automatically. Bad schedules/queries can create load or modify data unexpectedly."
+      log_event "event=ops:cron:add db=${DB} name=${NAME} sched=${SCHED} sql=<<redacted>>"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT cron.schedule(${NAME}, ${SCHED}, ${SQLTXT});" ;;
+
+  ops:cron:remove)
+      DB="${1:?DB required}"; JOBID="${2:?jobid required}"
+      confirm_risk "Remove pg_cron job ${JOBID}" "Stops the scheduled job from running further."
+      log_event "event=ops:cron:remove db=${DB} jobid=${JOBID}"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT cron.unschedule(${JOBID}::int);" ;;
+
+  ops:timescale:jobs)
+      DB="${1:?DB required}"
+      log_event "event=ops:timescale:jobs db=${DB}"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT job_id,schema_name,proc_name,schedule_interval,config FROM timescaledb_information.jobs ORDER BY job_id;" ;;
+
+  ops:timescale:policy:compress)
+      DB="${1:?DB required}"; TABLE="${2:?table required}"; INTERVAL_TXT="${3:?e.g. '30 days'}"
+      guard_identifier "$TABLE"
+      confirm_risk "Timescale compression policy on ${TABLE}" "Adds/updates compression policy. Compressed chunks trade CPU for storage."
+      log_event "event=ops:timescale:policy:compress db=${DB} table=${TABLE} interval='${INTERVAL_TXT}'"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT add_compression_policy('${TABLE}', INTERVAL '${INTERVAL_TXT}');" ;;
+
+  ops:timescale:policy:retention)
+      DB="${1:?DB required}"; TABLE="${2:?table required}"; INTERVAL_TXT="${3:?e.g. '90 days'}"
+      guard_identifier "$TABLE"
+      confirm_risk "Timescale retention policy on ${TABLE}" "DROPS chunks older than interval. DATA LOSS beyond window (by design)."
+      log_event "event=ops:timescale:policy:retention db=${DB} table=${TABLE} interval='${INTERVAL_TXT}'"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT add_retention_policy('${TABLE}', INTERVAL '${INTERVAL_TXT}');" ;;
+
+  ops:timescale:compress-now)
+      DB="${1:?DB required}"; TABLE="${2:?table required}"
+      guard_identifier "$TABLE"
+      confirm_risk "Compress chunks NOW for ${TABLE}" "Immediately compresses eligible chunks; CPU heavy. Queries on compressed data may be slower."
+      log_event "event=ops:timescale:compress-now db=${DB} table=${TABLE}"
+      prompt_db_creds
+      psql_exec "$DB" "SELECT compress_chunks('${TABLE}', now());" ;;
+
+  ops:partman:run)
+      DB="${1:?DB required}"
+      confirm_risk "Run pg_partman maintenance" "Creates/rolls partitions; may take locks briefly and create many objects."
+      log_event "event=ops:partman:run db=${DB}"
+      prompt_db_creds
+      if ! psql_exec "$DB" "SELECT partman.run_maintenance_proc();" >/dev/null 2>&1; then
+        psql_exec "$DB" "SELECT partman.run_maintenance();"
+      fi
+      ok "pg_partman maintenance kicked." ;;
+
+  backup:on)     export BACKUP_ENABLED=true;  log_event "event=backup:on";  "$0" "$@" restart ;;
+  backup:off)    export BACKUP_ENABLED=false; log_event "event=backup:off"; "$0" "$@" restart ;;
+  check)
+    log_event "event=check"
+    cat <<EOF
+${C_BOLD}Project:${C_RESET} ${COMPOSE_PROJECT_NAME}  ${C_BOLD}Port:${C_RESET} ${PG_PORT:-5432}  ${C_BOLD}TZ:${C_RESET} ${TZ:-UTC}
+${C_BOLD}DB:${C_RESET} ${APP_DB:-?}  ${C_BOLD}Roles:${C_RESET} ${DBA_USER:-?}, ${RW_USER:-?}, ${RO_USER:-?}
+${C_BOLD}Backups:${C_RESET} ${BACKUP_ENABLED:-false} (COMPOSE_PROFILES='${COMPOSE_PROFILES:-}')
+${C_BOLD}Mounts:${C_RESET}
+  DATA    => ${HOST_DATA_DIR} -> ${CONTAINER_DATA_DIR:-/var/lib/postgresql/data}
+  LOGS    => ${HOST_LOG_DIR}  -> ${CONTAINER_LOG_DIR:-/var/log/postgresql}
+  CONF    => ${HOST_CONF_DIR:-./docker/conf} -> ${CONTAINER_CONF_DIR:-/etc/postgresql} (ro)
+  INITDB  => ${HOST_INITDB_DIR:-./initdb}    -> ${CONTAINER_INITDB_DIR:-/docker-entrypoint-initdb.d} (ro)
+  BACKUPS => ${HOST_BACKUP_DIR} -> ${CONTAINER_BACKUP_DIR:-/backups} (sidecar)
+${C_BOLD}DB-UTILS target:${C_RESET} ${DBUTILS_BUILD_TARGET:-core_dbutils}
+${C_BOLD}SUDO mode:${C_RESET} $($USE_SUDO_DOCKER && echo "on" || echo "off")  (presupply=$($PRE_SUPPLY_SUDO && echo on || echo off))
+EOF
+    ;;
+  wipe:danger)
+    warn "This will ${C_RED}${C_BOLD}DELETE${C_RESET} ${HOST_DATA_DIR}."
+    read -r -p "Type YES to confirm: " ans < /dev/tty
+    [ "${ans}" = "YES" ] || { warn "Aborted."; exit 1; }
+    log_event "event=wipe:danger path=${HOST_DATA_DIR}"
+    dc down -v
+    rm -rf "${HOST_DATA_DIR}"
+    ok "Wiped. Run './bin/pg-docker --sudo-docker up' to re-init."
+    ;;
+  help|*)
+    log_event "event=help"
+    cat <<EOF
+    
+${C_YELLOW}pg-docker cli v1.1 - Manage quickpg17 docker container lifecycle with easy.${C_RESET}
+${C_YELLOW}-----------------------------------------------------------------------${C_RESET}
+https://github.com/lwdjohari/quickpg17-docker
+Author: Linggawasistha Djohari, 2025.
+
+${C_DIM}Usage:${C_RESET} ./bin/pg-docker [${C_YELLOW}--sudo-docker${C_RESET}] [${C_YELLOW}--sudo-presupply${C_RESET}] <command>
+
+${C_YELLOW}Flags:${C_RESET}
+  ${C_YELLOW}--sudo-docker${C_RESET}       Run ALL docker/compose commands via sudo
+  ${C_YELLOW}--sudo-presupply${C_RESET}    Prompt (hidden, twice) for sudo password and cache with sudo -v
+
+Docker:
+  ${C_BLUE}up${C_RESET} | ${C_BLUE}up:rebuild${C_RESET} | ${C_BLUE}down${C_RESET} | ${C_BLUE}restart${C_RESET} | ${C_BLUE}status${C_RESET} | ${C_BLUE}logs${C_RESET} | ${C_BLUE}logs:backup${C_RESET} | ${C_BLUE}shell${C_RESET} | ${C_BLUE}psql${C_RESET}
+
+Postgres Utilities:
+  ${C_BLUE}create-db  <db>${C_RESET}
+  ${C_BLUE}create-dba <db> <DBA_USER>${C_RESET}
+  ${C_BLUE}create-rw  <db> <RW_USER>${C_RESET}      
+  ${C_BLUE}create-ro  <db> <RO_USER>${C_RESET}     
+  ${C_BLUE}lock-user  <USER_TO_LOCK> <DBA_USER>${C_RESET}      
+  ${C_BLUE}add-ext    <db> "ext1,ext2"${C_RESET}    ${C_DIM}# schema via ext:schemaname${C_RESET}
+  ${C_BLUE}drop-ext   <db> "ext1,ext2"${C_RESET}
+  ${C_BLUE}list-ext   <db>${C_RESET}
+  ${C_BLUE}dbutils:present${C_RESET} | ${C_BLUE}dbutils:attach${C_RESET} | ${C_BLUE}dbutil ...${C_RESET}
+
+Postgres Ops-suite:
+  ${C_BLUE}ops:health <db>${C_RESET}
+  ${C_BLUE}ops:stats:top <db> [N]${C_RESET}
+  ${C_BLUE}ops:stats:reset <db>${C_RESET}                     ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:analyze <db> [schema.table]${C_RESET}          ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:vacuum:analyze <db> [schema.table]${C_RESET}   ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:reindex <db> <schema|schema.table>${C_RESET}   ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:repack <db> <schema.table>${C_RESET}           ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:bloat:estimate <db> <schema.table>${C_RESET}
+  ${C_BLUE}ops:conn:list <db>${C_RESET}
+  ${C_BLUE}ops:kill:idle <db> <minutes>${C_RESET}             ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:wal:switch <db>${C_RESET}                      ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:backup:now <db>${C_RESET}                      ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:restore:file <db> <host_path|name>${C_RESET}   ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:cron:list <db>${C_RESET}
+  ${C_BLUE}ops:cron:add <db> '<name>' '<sched>' '<sql>'${C_RESET}  ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:cron:remove <db> <jobid>${C_RESET}                  ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:timescale:jobs <db>${C_RESET}
+  ${C_BLUE}ops:timescale:policy:compress  <db> <table> <interval>${C_RESET}  ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:timescale:policy:retention <db> <table> <interval>${C_RESET}  ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:timescale:compress-now     <db> <table>${C_RESET}             ${C_DIM}# consent required${C_RESET}
+  ${C_BLUE}ops:partman:run <db>${C_RESET}                                    ${C_DIM}# consent required${C_RESET}
+
+${C_DIM}Logging:${C_RESET}
+  ${C_DIM}Host log:      ${HOST_LOG_FILE}${C_RESET}
+  ${C_DIM}Container log: /opt/db-utils/logs/pg-docker-ops.log${C_RESET}
+
+${C_DIM}Notes:${C_RESET}${C_DIM}
+  - Sensitive commands in pg-docker is need sudo elevation for security & safety. 
+  - All commands usage are being logging in the host and container respectively.
+  - All destructive/heavy operations print a risk summary and require typing YES.
+  - Ops always prompt for DB user & hidden password (not stored, not shown).
+  - Use --sudo-docker (and optional --sudo-presupply) to run Docker via sudo.
+${C_RESET}
+EOF
+
+#${C_DIM}Tip:Place flags anywhere, e.g.:
+#  ./bin/pg-docker ${C_YELLOW}--sudo-docker${C_RESET}${C_DIM} up
+#  ./bin/pg-docker create-dba mydb mydba ${C_RESET}${C_YELLOW}--sudo-docker --sudo-presupply${C_RESET}
+
+    ;;
+esac
