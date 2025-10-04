@@ -125,6 +125,22 @@ docker_cmd() {
 }
 compose_cmd() { docker_cmd compose "$@"; }
 
+# ---------------------------- permissions ------------------------------------
+
+# Run the fix-perms script
+fix_perms() {
+  bash permission-fix.sh
+}
+
+# Verify by showing file modes after fix
+check_perms() {
+  echo "Fix permission for scripts and secrets:"
+  bash permission-fix.sh
+  echo "Current modes:"
+  ls -l bin/pg-docker quickpg-build permission-fix.sh db-utils/*.sh ops/backup/*.sh 2>/dev/null || true
+}
+
+
 # ----------------------------- preflight -------------------------------------
 
 cat <<EOF
@@ -144,6 +160,8 @@ need_cmd sed
 need_cmd awk
 need_cmd dirname
 need_cmd date
+
+
 
 ROOT="$(pwd)"
 [ -f "${ROOT}/docker-compose.yml" ] || { err "Run this from the repo root with docker-compose.yml"; exit 2; }
@@ -408,6 +426,9 @@ fi
 
 say
 ok "Done."
+
+check_perms
+
 say "${C_BOLD}Next steps:${C_RESET}
   - ${C_DIM}Open psql:${C_RESET}          ./bin/pg psql
   - ${C_DIM}Enable backups:${C_RESET}      ./bin/pg backup:on

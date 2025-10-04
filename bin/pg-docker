@@ -76,6 +76,21 @@ if $USE_SUDO_DOCKER && $PRE_SUPPLY_SUDO; then
   fi
 fi
 
+# ---------------------------- permissions ------------------------------------
+
+# Run the fix-perms script
+fix_perms() {
+  bash permission-fix.sh
+}
+
+# Verify by showing file modes after fix
+check_perms() {
+  echo "Fix permission for scripts and secrets:"
+  bash permission-fix.sh
+  echo "Current modes:"
+  ls -l bin/pg-docker quickpg-build permission-fix.sh db-utils/*.sh ops/backup/*.sh 2>/dev/null || true
+}
+
 # -------------------------- logging (host + container) -----------------------
 HOST_CLI_DIR="${HOST_LOG_DIR}/cli"
 HOST_LOG_FILE="${HOST_CLI_DIR}/pg-docker-usage.log"
@@ -239,6 +254,10 @@ case "$cmd" in
       ok "db-utils attached." ;;
 
   dbutil) dbexec "$@" ;;
+
+  # fix-permission
+  fix-permission)
+      check_perms ;;
 
   # create DB/roles (passwords never logged)
   create-db)
@@ -485,6 +504,9 @@ ${C_YELLOW}Flags:${C_RESET}
 
 Docker:
   ${C_BLUE}up${C_RESET} | ${C_BLUE}up:rebuild${C_RESET} | ${C_BLUE}down${C_RESET} | ${C_BLUE}restart${C_RESET} | ${C_BLUE}status${C_RESET} | ${C_BLUE}logs${C_RESET} | ${C_BLUE}logs:backup${C_RESET} | ${C_BLUE}shell${C_RESET} | ${C_BLUE}psql${C_RESET}
+
+Security
+  ${C_BLUE}fix-permission${C_RESET}
 
 Postgres Utilities:
   ${C_BLUE}create-db  <db>${C_RESET}
