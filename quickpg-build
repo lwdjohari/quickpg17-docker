@@ -449,15 +449,16 @@ CONTAINER_INITDB_DIR: ${CONTAINER_INITDB_DIR}
 Compose files:        docker-compose.yaml$( [[ "$USE_SECRET_FILES" == "true" ]] && echo " + docker-compose.secrets.yaml" )
 CFG
 
-if ! confirm "Proceed to build image and start containers with the above settings?"; then
-  warn "Aborted by user before running Docker Compose."
-  exit 1
-fi
 
 # ----------------------------- build & start ---------------------------------
 if [ "$NO_START" = "true" ]; then
   warn "Skipping docker compose up (--no-start)."
   exit 0
+fi
+
+if ! confirm "Proceed to build image and start containers with the above settings?"; then
+  warn "Aborted by user before running Docker Compose."
+  exit 1
 fi
 
 export COMPOSE_PROFILES=""
