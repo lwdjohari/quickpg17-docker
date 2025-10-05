@@ -3,3 +3,4 @@ logs/
 logs/cli/pg-docker-usage.log
 .secrets
 .perms-consent
+.env.psql

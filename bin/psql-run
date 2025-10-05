@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+echo "==[ psql-run debug mode ]=="
+echo "PWD: $(pwd)"
+echo "Script: $0"
+echo
+
+# Load ONLY this file, not your app's .env
+if [ -f ".env.psql" ]; then
+  echo "[INFO] Loading .env.psql..."
+  set -a
+  # shellcheck disable=SC1091
+  . ".env.psql"
+  set +a
+else
+  echo "[WARN] .env.psql not found in $(pwd)"
+fi
+
+echo
+echo "[DEBUG] Environment variables after loading .env.psql:"
+echo "PGHOST=${PGHOST:-<unset>}"
+echo "PGPORT=${PGPORT:-<unset>}"
+echo "PGUSER=${PGUSER:-<unset>}"
+echo "PGDATABASE=${PGDATABASE:-<unset>}"
+echo "PGPASSWORD=${PGPASSWORD:+(set)}"
+echo
+
+# Show the exact command that will run
+echo "[INFO] Executing:"
+echo "psql -v ON_ERROR_STOP=1 -h \"${PGHOST}\" -p \"${PGPORT}\" -U \"${PGUSER}\" -d \"${PGDATABASE}\" $*"
+echo "-----------------------------------------------"
+echo
+
+# Finally execute psql
+exec psql -v ON_ERROR_STOP=1 \
+  -h "${PGHOST}" \
+  -p "${PGPORT}" \
+  -U "${PGUSER}" \
+  -d "${PGDATABASE}" \
+  "$@"

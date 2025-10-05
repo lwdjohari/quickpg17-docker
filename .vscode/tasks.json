@@ -1,0 +1,13 @@
+{
+    
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "psql: Run current sql file",
+            "type": "shell",
+            "command": "./bin/psql-run -f \"${file}\"",
+            "options": {"cwd": "${workspaceFolder}"},
+            "problemMatcher":[]
+        }
+    ]
+}
