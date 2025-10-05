@@ -196,6 +196,7 @@ if $is_postgres_cmd && [ -z "$wantHelp" ]; then
     _psql_common_args=(
       --username "${POSTGRES_USER:-postgres}"
       -d "${POSTGRES_DB:-postgres}"
+      --set=IS_INIT_DB=1
       --set=APP_DB="${APP_DB:-}"
       --set=DBA_USER="${DBA_USER:-}"
       --set=DBA_PASSWORD="${DBA_PASSWORD:-}"

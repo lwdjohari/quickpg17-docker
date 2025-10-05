@@ -24,6 +24,7 @@ echo "PGPORT=${PGPORT:-<unset>}"
 echo "PGUSER=${PGUSER:-<unset>}"
 echo "PGDATABASE=${PGDATABASE:-<unset>}"
 echo "PGPASSWORD=${PGPASSWORD:+(set)}"
+echo "--set=IS_INIT_DB=0"
 echo
 
 # Show the exact command that will run
@@ -38,4 +39,5 @@ exec psql -v ON_ERROR_STOP=1 \
   -p "${PGPORT}" \
   -U "${PGUSER}" \
   -d "${PGDATABASE}" \
+  --set=IS_INIT_DB=0 \
   "$@"
