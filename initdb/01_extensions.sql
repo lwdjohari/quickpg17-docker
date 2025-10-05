@@ -341,7 +341,22 @@ ORDER BY
 \pset tuples_only off
 --\pset format aligned
 
-
+-- refresh [ts] 
+SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
+-- --- Verification: list installed versions ---
+\echo :ts 'EXT::LIST: installed versions (selected set)'
+\echo ''
+SELECT name AS extname,
+       installed_version,
+       default_version
+FROM pg_available_extensions
+WHERE name IN (
+  'postgis','postgis_topology','postgis_raster','vector',
+  'pgcrypto','hstore','pg_trgm','unaccent','pg_stat_statements',
+  'pgstattuple','pgvector','pg_partman','pg_cron','pg_repack',
+  'pg_stat_kcache','pg_buffercache','hypopg','pg_uuidv7','timescaledb'
+)
+ORDER BY name;
 
 -- refresh [ts] and finish
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
