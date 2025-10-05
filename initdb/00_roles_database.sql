@@ -44,7 +44,6 @@
 -- ==================================================================================================
 
 \set ON_ERROR_STOP 1
-\set IS_INIT_DB 0 
 
 -- Refresh timestamp
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
