@@ -290,7 +290,6 @@ SELECT EXISTS (
   \echo :ts 'TABLE::metrics_ts created'
 \endif
 
--
 
 -- refresh [ts]
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
@@ -402,7 +401,7 @@ CREATE INDEX IF NOT EXISTS metrics_ts_loc_gist        ON public.metrics_ts USING
 \endif
 
 
-- TODO:
+-- TODO:
 -- we should GRANT this back to the user of this DB
 GRANT ALL ON SCHEMA public TO :"DBA_USER";
 GRANT USAGE ON SCHEMA public TO :"RW_USER", :"RO_USER";
