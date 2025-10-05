@@ -64,8 +64,7 @@ SELECT (:IS_INIT_DB::int = 0) AS init_disabled \gset
   \set RO_PASSWORD 'changeitlater'
 \endif
 
-\echo '=== PostgreSQL init 00 starting ==='
-\echo ''
+\echo :ts '=== 00 DB & Roles init starting ==='
 \echo :ts 'Values'
 \echo '         IS_INIT_DB =' :IS_INIT_DB
 \echo '         APP_DB     =' :"APP_DB"
@@ -89,6 +88,8 @@ SELECT (EXISTS(
   SELECT 1 FROM pg_roles WHERE rolname = :'RW_USER'
 ))::boolean AS has_rouser \gset
 
+-- refresh [ts]
+SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
 
 -- Create application database
 \if :db_exists
@@ -97,6 +98,9 @@ SELECT (EXISTS(
   CREATE DATABASE :"APP_DB";
   \echo :ts 'DB::CREATE: Creating DB ' :"APP_DB"
 \endif
+
+-- refresh [ts]
+SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
 
 -- Create roles (safe with IF NOT EXISTS in PG 17)
 \if :has_dba
@@ -124,6 +128,8 @@ SELECT (EXISTS(
   \echo :ts 'DB::ROUSER: Create user ':"RO_USER"
 \endif
 
+-- refresh [ts]
+SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
 
 -- Make DBA the owner of the app database
 ALTER DATABASE :"APP_DB" OWNER TO :"DBA_USER";
@@ -131,6 +137,9 @@ ALTER DATABASE :"APP_DB" OWNER TO :"DBA_USER";
 
 -- Connect to the app DB
 \connect :"APP_DB"
+
+-- refresh [ts]
+SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
 
 -- find partman schema
 SELECT (EXISTS(
@@ -145,12 +154,18 @@ SELECT (EXISTS(
   \echo :ts 'SCHEMA::PARTMAN: Create schema "partman" on ':"APP_DB"' with user ':"APP_DB"
 \endif
 
+-- refresh [ts]
+SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
+
 -- Public + partman schema usage
 GRANT ALL ON SCHEMA public TO :"DBA_USER";
 GRANT USAGE ON SCHEMA public TO :"RW_USER", :"RO_USER";
 GRANT USAGE ON SCHEMA partman TO :"RW_USER", :"RO_USER";
 
 \echo :ts 'SCHEMA::GRANT: Grant PARTMAN TO ':"DBA_USER"', ':"RW_USER"', ':"RO_USER"
+
+-- refresh [ts]
+SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
 
 -- Default privileges
 -- Future tables in public, created by DBA_USER
@@ -167,4 +182,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE :"DBA_USER"
   GRANT USAGE, CREATE ON SCHEMAS TO :"DBA_USER";
 \echo :ts 'SCHEMA::GRANT: GRANT USAGE, CREATE ON SCHEMAS to ':"DBA_USER"
 
-\echo '=== PostgreSQL init 00 finished ==='
+-- refresh [ts] and finish
+SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
+\echo :ts '=== 00 DB & Roles init finished ==='
