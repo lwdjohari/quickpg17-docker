@@ -74,6 +74,25 @@ COPY --from=uuidv7-builder /staging/lib/pg_uuidv7.so \
 COPY --from=uuidv7-builder /staging/extension/pg_uuidv7* \
   /usr/share/postgresql/17/extension/
 
+
+# after packages are installed (in the final stage)
+# so the temp server already has extensions preloaded
+RUN set -e; \
+  SAMPLE="$(ls /usr/share/postgresql/*/postgresql.conf.sample | head -n1)"; \
+  LIBDIR="$(pg_config --pkglibdir)"; \
+  WANT="timescaledb pg_stat_statements pg_stat_kcache pg_uuidv7 pg_cron pg_partman_bgw"; \
+  SPL=""; \
+  for L in $WANT; do \
+    if [ -e "$LIBDIR/$L.so" ]; then SPL="${SPL:+$SPL,}$L"; fi; \
+  done; \
+  if [ -n "$SPL" ]; then \
+    if grep -qE '^[# ]*shared_preload_libraries' "$SAMPLE"; then \
+      sed -i "s|^[# ]*shared_preload_libraries.*|shared_preload_libraries = '$SPL'|" "$SAMPLE"; \
+    else \
+      echo "shared_preload_libraries = '$SPL'" >> "$SAMPLE"; \
+    fi; \
+  fi
+
 # Your config + init scripts baked in (compose mounts can override)
 COPY docker/conf/ /etc/postgresql/
 RUN chmod 0644 /etc/postgresql/*
