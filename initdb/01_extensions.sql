@@ -45,7 +45,6 @@
 -- Date:   2025-10-05
 -- ==================================================================================================
 \set ON_ERROR_STOP 1
-\set IS_INIT_DB 0 
 
 -- compute a boolean in SQL and capture it
 SELECT (:IS_INIT_DB::int = 0) AS init_disabled \gset
@@ -71,7 +70,7 @@ SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS t
 SELECT current_database() AS cur_db,
        current_setting('search_path') AS cur_search_path
 \gset
-\echo :ts 'DB::INFO DB=' :cur_db ' search_path=' :cur_search_path
+\echo :ts 'DB::INFO: DB=':"cur_db"' search_path=':cur_search_path
 
 -- --- PostGIS stack -- 
 -- postgis
@@ -159,6 +158,28 @@ SELECT EXISTS (
 
 -- refresh [ts] 
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
+-- pg_vector
+SELECT EXISTS (
+  SELECT 1 FROM pg_available_extensions 
+    WHERE name='vector') 
+  AS has_vector \gset
+
+SELECT EXISTS (
+  SELECT 1 FROM pg_extension 
+  WHERE extname = 'vector'
+) AS has_vector_installed \gset
+
+\if :has_vector_installed
+  \echo :ts 'EXT::CREATE: pg_vector (installed)'
+\elif :has_vector
+  CREATE EXTENSION IF NOT EXISTS vector;
+  \echo :ts 'EXT::CREATE: pg_vector (added - OK)'
+\else
+  \echo :ts 'EXT::SKIP: pg_vector not available'
+\endif
+
+-- refresh [ts] 
+SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
 -- --- Text search config: simple_unaccent ----
 SELECT EXISTS (
   SELECT 1 FROM pg_ts_config 
@@ -197,7 +218,7 @@ SELECT current_setting('shared_preload_libraries', true) AS spl \gset
 WITH wanted(name) AS (
   VALUES
     ('pgcrypto'),('hstore'),('pg_trgm'),('unaccent'),('pg_stat_statements'),
-    ('pgstattuple'),('pgvector'),('pg_partman'),
+    ('pgstattuple'),('pg_partman'),
     ('pg_repack'),('pg_stat_kcache'),('pg_buffercache'),
     ('hypopg'),('pg_uuidv7')
 ),
@@ -229,7 +250,7 @@ FROM to_create
 WITH wanted(name) AS (
   VALUES
     ('pgcrypto'),('hstore'),('pg_trgm'),('unaccent'),('pg_stat_statements'),
-    ('pgstattuple'),('pgvector'),('pg_partman'),
+    ('pgstattuple'),('pg_partman'),
     ('pg_repack'),('pg_stat_kcache'),('pg_buffercache'),
     ('hypopg'),('pg_uuidv7')
 ),
@@ -271,49 +292,6 @@ ORDER BY
 \pset tuples_only off
 --\pset format aligned
 
-
--- refresh [ts] 
--- SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
--- -- === SUMMARY (one item per line ==========================
--- \echo :ts 'EXT::LIST: Status' 
--- \echo ''
-
--- WITH wanted(name) AS (
---   VALUES
---     ('pgcrypto'),('hstore'),('pg_trgm'),('unaccent'),('pg_stat_statements'),
---     ('pgstattuple'),('pgvector'),('pg_partman'),('pg_cron'),('pg_repack'),
---     ('pg_stat_kcache'),('pg_buffercache'),('hypopg'),('pg_uuidv7')
--- ),
--- preload_req(name) AS (
---   VALUES ('pg_stat_statements'),('pg_cron'),('timescaledb'),
---          ('pg_stat_kcache'),('pg_uuidv7')
--- ),
--- avail AS (
---   SELECT name FROM pg_available_extensions
--- ),
--- spl AS (
---   SELECT current_setting('shared_preload_libraries', true) AS v
--- ),
--- classify AS (
---   SELECT w.name,
---          CASE
---            WHEN NOT EXISTS (SELECT 1 FROM avail a WHERE a.name = w.name)
---              THEN 'not_available'
---            WHEN EXISTS (SELECT 1 FROM preload_req p WHERE p.name = w.name)
---                 AND (SELECT v FROM spl) NOT ILIKE '%' || w.name || '%'
---              THEN 'needs_preload'
---            ELSE 'ok'
---          END AS status
---   FROM wanted w
--- )
--- SELECT
---   CASE WHEN status='ok' THEN '[OK] ' || name
---        WHEN status='needs_preload' THEN '[PRELOAD] ' || name
---        WHEN status='not_available' THEN '[MISSING] ' || name
---   END AS Extensions
--- FROM classify
--- ORDER BY status, name;
-
 -- refresh [ts] 
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
 -- --- Verification: list installed versions ---
@@ -324,7 +302,7 @@ SELECT name AS extname,
        default_version
 FROM pg_available_extensions
 WHERE name IN (
-  'postgis','postgis_topology','postgis_raster',
+  'postgis','postgis_topology','postgis_raster','vector',
   'pgcrypto','hstore','pg_trgm','unaccent','pg_stat_statements',
   'pgstattuple','pgvector','pg_partman','pg_cron','pg_repack',
   'pg_stat_kcache','pg_buffercache','hypopg','pg_uuidv7','timescaledb'
