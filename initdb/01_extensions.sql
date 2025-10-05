@@ -67,6 +67,12 @@ SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS t
 
 \connect :"APP_DB"
 
+-- show where we really are
+SELECT current_database() AS cur_db,
+       current_setting('search_path') AS cur_search_path
+\gset
+\echo :ts 'DB::INFO DB=' :cur_db ' search_path=' :cur_search_path
+
 -- --- PostGIS stack -- 
 -- postgis
 SELECT EXISTS (
