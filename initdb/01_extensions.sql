@@ -72,6 +72,24 @@ SELECT current_database() AS cur_db,
 \gset
 \echo :ts 'DB::INFO: DB=':"cur_db"' search_path=':cur_search_path
 
+
+-- refresh [ts] 
+SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
+-- --- Verification: list installed versions ---
+\echo :ts 'EXT::LIST: installed versions (selected set)'
+\echo ''
+SELECT name AS extname,
+       installed_version,
+       default_version
+FROM pg_available_extensions
+WHERE name IN (
+  'postgis','postgis_topology','postgis_raster','vector',
+  'pgcrypto','hstore','pg_trgm','unaccent','pg_stat_statements',
+  'pgstattuple','pgvector','pg_partman','pg_cron','pg_repack',
+  'pg_stat_kcache','pg_buffercache','hypopg','pg_uuidv7','timescaledb'
+)
+ORDER BY name;
+
 -- --- PostGIS stack -- 
 -- postgis
 SELECT EXISTS (
@@ -180,19 +198,50 @@ SELECT EXISTS (
 
 -- refresh [ts] 
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
--- --- Text search config: simple_unaccent ----
-SELECT EXISTS (
-  SELECT 1 FROM pg_ts_config 
-    WHERE cfgname='simple_unaccent') 
-  AS has_simple_unaccent \gset
+-- --- Text search config: simple_unaccent (quiet & safe) ---------------------
 
-\if :has_simple_unaccent
-  \echo :ts 'TEXTSEARCH::CFG: simple_unaccent already exists'
+-- 1) Make sure the unaccent extension exists here
+SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='unaccent') AS has_unaccent \gset
+\if :has_unaccent
+  \echo :ts 'TS::UNACCENT: extension present'
 \else
-  CREATE TEXT SEARCH CONFIGURATION simple_unaccent (COPY = simple);
-  ALTER TEXT SEARCH CONFIGURATION simple_unaccent
-    ALTER MAPPING FOR hword, hword_part, word WITH unaccent, simple;
-  \echo :ts 'TEXTSEARCH::CFG: created simple_unaccent'
+  SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name='unaccent') AS unaccent_avail \gset
+  \if :unaccent_avail
+    CREATE EXTENSION unaccent;
+    \echo :ts 'TS::UNACCENT: extension created'
+  \else
+    \echo :ts 'TS::CFG: SKIP — unaccent not available on this server'
+    \endif
+\endif
+
+-- 2) Find the fully-qualified dictionary name (e.g., public.unaccent)
+SELECT n.nspname || '.' || d.dictname AS unaccent_dict
+FROM pg_ts_dict d
+JOIN pg_namespace n ON n.oid = d.dictnamespace
+WHERE d.dictname = 'unaccent'
+LIMIT 1
+\gset
+
+\if :{?unaccent_dict}
+  -- 3) Ensure the config exists
+  SELECT EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname='simple_unaccent') AS has_simple_unaccent \gset
+  \if :has_simple_unaccent
+    \echo :ts 'TS::CFG: simple_unaccent already exists'
+  \else
+    CREATE TEXT SEARCH CONFIGURATION simple_unaccent (COPY = simple);
+    \echo :ts 'TS::CFG: created simple_unaccent'
+  \endif
+
+  -- 4) Set mapping using schema-qualified dictionary (no search_path surprises)
+  SELECT format($f$
+    ALTER TEXT SEARCH CONFIGURATION simple_unaccent
+      ALTER MAPPING FOR hword, hword_part, word
+      WITH %s, simple;
+  $f$, :'unaccent_dict') AS _sql \gset
+  :_sql
+  \echo :ts 'TS::CFG: mapping set to ' :unaccent_dict ', simple'
+\else
+  \echo :ts 'TS::CFG: SKIP — unaccent dictionary not found (extension not created?)'
 \endif
 
 -- refresh [ts] 
@@ -292,22 +341,7 @@ ORDER BY
 \pset tuples_only off
 --\pset format aligned
 
--- refresh [ts] 
-SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
--- --- Verification: list installed versions ---
-\echo :ts 'EXT::LIST: installed versions (selected set)'
-\echo ''
-SELECT name AS extname,
-       installed_version,
-       default_version
-FROM pg_available_extensions
-WHERE name IN (
-  'postgis','postgis_topology','postgis_raster','vector',
-  'pgcrypto','hstore','pg_trgm','unaccent','pg_stat_statements',
-  'pgstattuple','pgvector','pg_partman','pg_cron','pg_repack',
-  'pg_stat_kcache','pg_buffercache','hypopg','pg_uuidv7','timescaledb'
-)
-ORDER BY name;
+
 
 -- refresh [ts] and finish
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
