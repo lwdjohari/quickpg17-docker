@@ -74,6 +74,8 @@ SELECT (:IS_INIT_DB::int = 0) AS init_disabled \gset
 \if :init_disabled
   \set APP_DB 'app_db'
   \set DBA_USER 'dba_user'
+  \set RW_USER 'rw_user'
+  \set RO_USER 'ro_user'
 \endif
 
 -- refresh [ts]
@@ -83,6 +85,8 @@ SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS t
 \echo '         IS_INIT_DB =' :IS_INIT_DB
 \echo '         APP_DB     =' :"APP_DB"
 \echo '         DBA_USER   =' :"DBA_USER"
+\echo '         RW_USER    =' :"RW_USER"
+\echo '         RO_USER    =' :"RO_USER"
 
 -- ===== Dependency gate (hard fail with guidance) ============================
 -- needed for geography(Point,4326)
@@ -286,6 +290,8 @@ SELECT EXISTS (
   \echo :ts 'TABLE::metrics_ts created'
 \endif
 
+-
+
 -- refresh [ts]
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
 
@@ -394,6 +400,13 @@ CREATE INDEX IF NOT EXISTS metrics_ts_loc_gist        ON public.metrics_ts USING
 \if :partman_installed
   \echo :ts 'EXT::PARTMAN partman not yet implemented for this example'
 \endif
+
+
+- TODO:
+-- we should GRANT this back to the user of this DB
+GRANT ALL ON SCHEMA public TO :"DBA_USER";
+GRANT USAGE ON SCHEMA public TO :"RW_USER", :"RO_USER";
+GRANT USAGE ON SCHEMA partman TO :"RW_USER", :"RO_USER";
 
 -- refresh [ts]
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
