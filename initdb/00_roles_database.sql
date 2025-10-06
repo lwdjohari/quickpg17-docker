@@ -84,7 +84,7 @@ SELECT (EXISTS(
 ))::boolean AS has_rwuser \gset
 
 SELECT (EXISTS(
-  SELECT 1 FROM pg_roles WHERE rolname = :'RW_USER'
+  SELECT 1 FROM pg_roles WHERE rolname = :'RO_USER'
 ))::boolean AS has_rouser \gset
 
 -- refresh [ts]
@@ -134,8 +134,11 @@ SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS t
 ALTER DATABASE :"APP_DB" OWNER TO :"DBA_USER";
 \echo :ts 'DB::ALTER_OWNER: DB ':"APP_DB"' OWNER ':"DBA_USER"
 
+GRANT CONNECT ON DATABASE :"APP_DB" TO :"DBA_USER", :"RW_USER", :"RO_USER";
+
 -- Connect to the app DB
 \connect :"APP_DB"
+SET ROLE :"DBA_USER";
 
 -- refresh [ts]
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
@@ -156,30 +159,50 @@ SELECT (EXISTS(
 -- refresh [ts]
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
 
+
 -- Public + partman schema usage
 GRANT ALL ON SCHEMA public TO :"DBA_USER";
 GRANT USAGE ON SCHEMA public TO :"RW_USER", :"RO_USER";
 GRANT USAGE ON SCHEMA partman TO :"RW_USER", :"RO_USER";
 
-\echo :ts 'SCHEMA::GRANT: Grant PARTMAN TO ':"DBA_USER"', ':"RW_USER"', ':"RO_USER"
+\echo :ts 'SCHEMA::GRANT: Grant Public & PARTMAN TO ':"DBA_USER"', ':"RW_USER"', ':"RO_USER"
 
 -- refresh [ts]
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
 
--- Default privileges
--- Future tables in public, created by DBA_USER
-ALTER DEFAULT PRIVILEGES FOR ROLE :"DBA_USER" IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO :"RW_USER";
-\echo :ts 'SCHEMA::GRANT: GRANT SELECT, INSERT, UPDATE, DELETE to ':"RW_USER"
+SET ROLE :"DBA_USER";
 
-ALTER DEFAULT PRIVILEGES FOR ROLE :"DBA_USER" IN SCHEMA public
-  GRANT SELECT ON TABLES TO :"RO_USER";
-\echo :ts 'SCHEMA::GRANT: GRANT SELECT to ':"RO_USER"
 
--- Future schemas created by DBA_USER (global, no IN SCHEMA here!)
-ALTER DEFAULT PRIVILEGES FOR ROLE :"DBA_USER"
-  GRANT USAGE, CREATE ON SCHEMAS TO :"DBA_USER";
-\echo :ts 'SCHEMA::GRANT: GRANT USAGE, CREATE ON SCHEMAS to ':"DBA_USER"
+-- ======================================================================
+-- Default privileges (future-proofed for all object types)
+-- These ensure any new objects created by DBA_USER automatically
+-- grant the right privileges to RW_USER and RO_USER.
+-- ======================================================================
+
+-- Tables & Views
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT ON TABLES TO :"RO_USER", :"RW_USER";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT INSERT, UPDATE, DELETE ON TABLES TO :"RW_USER";
+
+-- Materialized Views
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT ON MATERIALIZED VIEWS TO :"RO_USER", :"RW_USER";
+
+-- Sequences (identity/serial)
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO :"RO_USER", :"RW_USER";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT UPDATE ON SEQUENCES TO :"RW_USER";
+
+-- Functions / Procedures
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT EXECUTE ON FUNCTIONS TO :"RO_USER", :"RW_USER";
+
+-- Types (domains, enums, composite types)
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT USAGE ON TYPES TO :"RO_USER", :"RW_USER";
+
 
 -- refresh [ts] and finish
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset

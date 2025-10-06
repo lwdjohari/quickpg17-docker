@@ -65,7 +65,7 @@ SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS t
 \echo '         DBA_USER   =' :"DBA_USER"
 
 \connect :"APP_DB"
-
+SET ROLE :"DBA_USER";
 -- show where we really are
 SELECT current_database() AS cur_db,
        current_setting('search_path') AS cur_search_path

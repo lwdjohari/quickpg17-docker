@@ -110,7 +110,7 @@ SELECT (:SREQUIRE_PARTMAN::int <> 0) AS require_partman \gset
 \echo '         REQUIRE_PARTMAN         =' :SREQUIRE_PARTMAN
 
 \connect :"APP_DB"
-
+SET ROLE :"DBA_USER";
 -- show where we really are
 SELECT current_database() AS cur_db,
        current_setting('search_path') AS cur_search_path
@@ -401,11 +401,6 @@ CREATE INDEX IF NOT EXISTS metrics_ts_loc_gist        ON public.metrics_ts USING
 \endif
 
 
--- TODO:
--- we should GRANT this back to the user of this DB
-GRANT ALL ON SCHEMA public TO :"DBA_USER";
-GRANT USAGE ON SCHEMA public TO :"RW_USER", :"RO_USER";
-GRANT USAGE ON SCHEMA partman TO :"RW_USER", :"RO_USER";
 
 -- refresh [ts]
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
