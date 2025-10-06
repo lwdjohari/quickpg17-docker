@@ -110,7 +110,12 @@ SELECT (:SREQUIRE_PARTMAN::int <> 0) AS require_partman \gset
 \echo '         REQUIRE_PARTMAN         =' :SREQUIRE_PARTMAN
 
 \connect :"APP_DB"
+
+SELECT current_setting('shared_preload_libraries', true) AS spl \gset
+SELECT (POSITION('timescaledb' IN COALESCE(:'spl','')) > 0) AS tsdb_preloaded \gset
+
 SET ROLE :"DBA_USER";
+
 -- show where we really are
 SELECT current_database() AS cur_db,
        current_setting('search_path') AS cur_search_path
@@ -138,8 +143,7 @@ SELECT EXISTS (SELECT 1 FROM pg_extension
   WHERE extname='timescaledb') 
   AS tsdb_installed   \gset
 
-SELECT current_setting('shared_preload_libraries', true) AS spl \gset
-SELECT (POSITION('timescaledb' IN COALESCE(:'spl','')) > 0) AS tsdb_preloaded \gset
+
 
 SELECT EXISTS (SELECT 1 FROM pg_available_extensions 
   WHERE name='vector')       

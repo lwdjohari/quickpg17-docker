@@ -54,6 +54,8 @@ SELECT (:IS_INIT_DB::int = 0) AS init_disabled \gset
 \if :init_disabled
   \set APP_DB 'app_db'
   \set DBA_USER 'dba_user'
+  \set RW_USER 'rw_user'
+  \set RO_USER 'ro_user'
 \endif
 
 -- refresh [ts]
@@ -63,9 +65,10 @@ SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS t
 \echo '         IS_INIT_DB =' :IS_INIT_DB
 \echo '         APP_DB     =' :"APP_DB"
 \echo '         DBA_USER   =' :"DBA_USER"
+\echo '         RW_USER    =' :"RW_USER"
+\echo '         RO_USER    =' :"RO_USER"
 
 \connect :"APP_DB"
-SET ROLE :"DBA_USER";
 -- show where we really are
 SELECT current_database() AS cur_db,
        current_setting('search_path') AS cur_search_path
@@ -154,28 +157,6 @@ SELECT EXISTS (
 
 -- refresh [ts] 
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
--- --- TimescaleDB ---
-SELECT EXISTS (
-  SELECT 1 FROM pg_available_extensions 
-    WHERE name='timescaledb') 
-  AS has_timescaledb \gset
-
-SELECT EXISTS (
-  SELECT 1 FROM pg_extension 
-  WHERE extname = 'timescaledb'
-) AS has_timescaledb_installed \gset
-
-\if :has_timescaledb_installed
-  \echo :ts 'EXT::CREATE: timescaledb (installed)'
-\elif :has_timescaledb
-  CREATE EXTENSION IF NOT EXISTS timescaledb;
-  \echo :ts 'EXT::CREATE: timescaledb (added - OK)'
-\else
-  \echo :ts 'EXT::SKIP: timescaledb not available'
-\endif
-
--- refresh [ts] 
-SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
 -- pg_vector
 SELECT EXISTS (
   SELECT 1 FROM pg_available_extensions 
@@ -195,6 +176,7 @@ SELECT EXISTS (
 \else
   \echo :ts 'EXT::SKIP: pg_vector not available'
 \endif
+
 
 -- refresh [ts] 
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
@@ -243,6 +225,34 @@ LIMIT 1
 \else
   \echo :ts 'TS::CFG: SKIP — unaccent dictionary not found (extension not created?)'
 \endif
+
+
+
+-- refresh [ts] 
+SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
+-- --- TimescaleDB ---
+SELECT EXISTS (
+  SELECT 1 FROM pg_available_extensions 
+    WHERE name='timescaledb') 
+  AS has_timescaledb \gset
+
+SELECT EXISTS (
+  SELECT 1 FROM pg_extension 
+  WHERE extname = 'timescaledb'
+) AS has_timescaledb_installed \gset
+
+\if :has_timescaledb_installed
+  \echo :ts 'EXT::CREATE: timescaledb (installed)'
+\elif :has_timescaledb
+  CREATE EXTENSION IF NOT EXISTS timescaledb;
+  \echo :ts 'EXT::CREATE: timescaledb (added - OK)'
+\else
+  \echo :ts 'EXT::SKIP: timescaledb not available'
+\endif
+
+
+
+
 
 -- refresh [ts] 
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
@@ -357,6 +367,32 @@ WHERE name IN (
   'pg_stat_kcache','pg_buffercache','hypopg','pg_uuidv7','timescaledb'
 )
 ORDER BY name;
+
+SET ROLE :"DBA_USER";
+
+-- Tables & Views
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT ON TABLES TO :"RO_USER", :"RW_USER";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT INSERT, UPDATE, DELETE ON TABLES TO :"RW_USER";
+
+-- -- Materialized Views
+-- ALTER DEFAULT PRIVILEGES IN SCHEMA public
+--   GRANT SELECT ON MATERIALIZED VIEWS TO :"RO_USER", :"RW_USER";
+
+-- Sequences (identity/serial)
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO :"RO_USER", :"RW_USER";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT UPDATE ON SEQUENCES TO :"RW_USER";
+
+-- Functions / Procedures
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT EXECUTE ON FUNCTIONS TO :"RO_USER", :"RW_USER";
+
+-- Types (domains, enums, composite types)
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT USAGE ON TYPES TO :"RO_USER", :"RW_USER";
 
 -- refresh [ts] and finish
 SELECT '[' || to_char(clock_timestamp(),'YY.MM.DD HH24:MI:SS.MS TZ') || ']' AS ts \gset
